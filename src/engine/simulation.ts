@@ -156,37 +156,57 @@ export function simulateCircuit(
  * spaced out with room for clean wiring.
  */
 export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  // SUPPLY_WIDTH = 5 * 24 = 120, BOARD_X = 120
-  // Grid = 24px. 555 is 4x4 (96x96), Resistor 3x1 (72x24), LED 1x1 (24x24)
+  // Breadboard grid: GRID_W=24, GRID_H=17, BOARD_X_OFFSET=96
+  // Pin hole center at (col, row): x = 96 + col*24 + 12, y = row*17 + 8.5
+  //
+  // Board 0 columns: left rail 0-1, left comp 2-6, gap 7, right comp 8-12, right rail 13-14
+  //
+  // 555 Timer (2×4): straddles gap, left pins on col 6, right pins on col 8, rows 5-8
+  // Resistor (1×2 vertical): col 10, rows 6-8
+  // LED (1×1): col 10, rows 9-10
+  // Power: in supply area at x=0
+
   const components: PlacedComponent[] = [
     {
       id: 'power1',
       type: 'power',
-      position: { x: 24, y: 120 },
+      position: { x: 0, y: 85 },
       rotation: 0,
       properties: { voltage: 5, mode: 'DC', waveform: 'square' },
       state: {},
     },
     {
+      // 555 straddles center gap: left pins col 6, right pins col 8, rows 5-8
+      // First pin (gnd): left, offset 0.875 => pinOff=(0, 59.5)
+      // Target: col 6 row 8 => hole=(252, 144.5)
+      // Position: (252, 144.5 - 59.5) = (252, 85)
       id: 'timer1',
       type: 'timer',
-      position: { x: 216, y: 96 },
+      position: { x: 252, y: 85 },
       rotation: 0,
       properties: { interval: 2000 },
       state: { outputHigh: 0 },
     },
     {
+      // Resistor at col 10, rows 6-8
+      // First pin (a): top, offset 0.5 => pinOff=(12, 0)
+      // Target: col 10 row 6 => hole=(348, 110.5)
+      // Position: (348 - 12, 110.5) = (336, 110.5)
       id: 'resistor1',
       type: 'resistor',
-      position: { x: 432, y: 168 },
+      position: { x: 336, y: 110.5 },
       rotation: 0,
       properties: { resistance: 220 },
       state: {},
     },
     {
+      // LED at col 10, row 9
+      // First pin (anode): top, offset 0.5 => pinOff=(12, 0)
+      // Target: col 10 row 9 => hole=(348, 161.5)
+      // Position: (348 - 12, 161.5) = (336, 161.5)
       id: 'led1',
       type: 'led',
-      position: { x: 564, y: 156 },
+      position: { x: 336, y: 161.5 },
       rotation: 0,
       properties: { forwardVoltage: 2.0, color: 'red' },
       state: { on: 0 },
@@ -194,7 +214,7 @@ export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires
   ];
 
   const wires: Wire[] = [
-    // Power + -> Timer VCC (right side of 555)
+    // Power + -> Timer VCC (col 8, row 5)
     {
       id: 'w1',
       from: { componentId: 'power1', pinId: 'pos' },
@@ -202,15 +222,15 @@ export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires
       waypoints: [],
       color: '#ef4444',
     },
-    // Power - -> Timer GND (left side of 555)
+    // Power - -> Timer GND (col 6, row 8)
     {
       id: 'w2',
       from: { componentId: 'power1', pinId: 'neg' },
       to: { componentId: 'timer1', pinId: 'gnd' },
       waypoints: [],
-      color: '#3b82f6',
+      color: '#1e1e1e',
     },
-    // Timer OUT (left side) -> Resistor A
+    // Timer OUT (col 6, row 6) -> Resistor A (col 10, row 6)
     {
       id: 'w3',
       from: { componentId: 'timer1', pinId: 'out' },
@@ -218,7 +238,7 @@ export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires
       waypoints: [],
       color: '#fbbf24',
     },
-    // Resistor B -> LED Anode (top)
+    // Resistor B (col 10, row 8) -> LED Anode (col 10, row 9)
     {
       id: 'w4',
       from: { componentId: 'resistor1', pinId: 'b' },
@@ -226,13 +246,13 @@ export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires
       waypoints: [],
       color: '#fbbf24',
     },
-    // LED Cathode (bottom) -> Power GND
+    // LED Cathode (col 10, row 10) -> Power GND
     {
       id: 'w5',
       from: { componentId: 'led1', pinId: 'cathode' },
       to: { componentId: 'power1', pinId: 'neg' },
       waypoints: [],
-      color: '#3b82f6',
+      color: '#1e1e1e',
     },
   ];
 

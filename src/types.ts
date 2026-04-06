@@ -31,10 +31,20 @@ export interface PlacedComponent {
   state: Record<string, number | string>; // runtime state (e.g. LED on/off, voltage)
 }
 
+/**
+ * Wire endpoint — either a component pin or a breadboard pin hole.
+ * For component pins: componentId = component id, pinId = pin id
+ * For breadboard holes: componentId = 'board', pinId = 'col,row'
+ */
+export interface WireEndpoint {
+  componentId: string;
+  pinId: string;
+}
+
 export interface Wire {
   id: string;
-  from: { componentId: string; pinId: string };
-  to: { componentId: string; pinId: string };
+  from: WireEndpoint;
+  to: WireEndpoint;
   waypoints: Point[];    // intermediate points for routing
   color: string;
 }

@@ -314,12 +314,27 @@ function App() {
         setSelectedComponentId(null);
         setSelectedWireId(null);
       }
+      if (e.key === 'r' || e.key === 'R') {
+        if ((e.target as HTMLElement).tagName === 'INPUT') return;
+        if (selectedComponentId) {
+          setComponents((prev) => prev.map((c) =>
+            c.id === selectedComponentId
+              ? { ...c, rotation: (c.rotation + 90) % 360 }
+              : c
+          ));
+        }
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [handleSave, handleLoad, selectedComponentId, selectedWireId, handleDeleteComponent, handleDeleteWire]);
 
   const selectedComponent = components.find((c) => c.id === selectedComponentId) ?? null;
+  const selectedWire = wires.find((w) => w.id === selectedWireId) ?? null;
+
+  const handleWireColorChange = useCallback((wireId: string, color: string) => {
+    setWires((prev) => prev.map((w) => w.id === wireId ? { ...w, color } : w));
+  }, []);
 
   return (
     <div className="app-shell">
@@ -361,7 +376,17 @@ function App() {
           )}
         </div>
       </div>
-      <PropertiesPanel component={selectedComponent} onPropertyChange={handlePropertyChange} />
+      <PropertiesPanel
+        component={selectedComponent}
+        onPropertyChange={handlePropertyChange}
+        onRotate={(id) => {
+          setComponents((prev) => prev.map((c) =>
+            c.id === id ? { ...c, rotation: (c.rotation + 90) % 360 } : c
+          ));
+        }}
+        selectedWire={selectedWire}
+        onWireColorChange={handleWireColorChange}
+      />
 
       {pendingPowerDrop && (
         <PowerConfigModal

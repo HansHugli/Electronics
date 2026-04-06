@@ -1,25 +1,16 @@
 import { useRef, useCallback, useMemo, useState } from 'react';
 import { PlacedComponent, Wire, Point } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
-
-const GRID_SIZE = 24;
-const BOARD_COLS = 30;
-const BOARD_ROWS = 20;
-const BOARD_WIDTH = BOARD_COLS * GRID_SIZE;
-const BOARD_HEIGHT = BOARD_ROWS * GRID_SIZE;
-
-// Power supply area to the left of the breadboard
-const SUPPLY_WIDTH = 5 * GRID_SIZE;
-const TOTAL_WIDTH = SUPPLY_WIDTH + BOARD_WIDTH;
-
-// Breadboard starts after the supply area
-const BOARD_X = SUPPLY_WIDTH;
-
-// Power rail rows (relative to board area)
-const POWER_RAIL_TOP = 1;
-const GROUND_RAIL_TOP = 2;
-const POWER_RAIL_BOTTOM = BOARD_ROWS - 2;
-const GROUND_RAIL_BOTTOM = BOARD_ROWS - 1;
+import {
+  GRID_W, GRID_H, TOTAL_ROWS, BOARD_TOTAL_COLS,
+  BOARD_PIXEL_WIDTH, BOARD_PIXEL_HEIGHT,
+  SUPPLY_WIDTH, TOTAL_PIXEL_WIDTH, BOARD_X_OFFSET,
+  COMP_COLS, RAIL_GROUP_SIZE,
+  NUM_BOARDS, SINGLE_BOARD_COLS,
+  boardColumns, boardColOffset,
+  REL_COL_GAP,
+  gridToPixel, isGapColumn,
+} from '../data/breadboard';
 
 
 interface BreadboardProps {
@@ -38,11 +29,81 @@ interface BreadboardProps {
   onToggleSwitch: (id: string) => void;
 }
 
-function snapToGrid(x: number, y: number): Point {
+/**
+ * Snap a component position so its pins align with breadboard pin hole centers.
+ *
+ * Pin hole centers are at: x = BOARD_X_OFFSET + col*GRID_W + GRID_W/2
+ *                          y = row*GRID_H + GRID_H/2
+ *
+ * Component pins use fractional offsets (e.g. 0.5 on a 1-wide = GRID_W/2).
+ * Snapping the component top-left to grid boundaries ensures pins land on centers:
+ *   comp at (BOARD_X_OFFSET + col*GRID_W, row*GRID_H)
+ *   pin at offset 0.5 on 1-wide: x = comp_x + GRID_W/2 = pin hole center ✓
+ *   left pin at offset 0: x = comp_x = BOARD_X_OFFSET + col*GRID_W (NOT a center)
+ *
+ * For left/right side pins (offset 0 or width), the component x must be at a
+ * pin hole center. For top/bottom pins (offset 0.5), comp x must be at a grid boundary.
+ *
+ * Solution: snap to grid boundaries. Components with left/right edge pins
+ * should use half-grid offsets in their definitions.
+ */
+/**
+ * Snap a component so its first pin lands on a breadboard pin hole center.
+ * Pin hole centers: x = BOARD_X_OFFSET + col*GRID_W + GRID_W/2, y = row*GRID_H + GRID_H/2
+ */
+function snapComponentToGrid(x: number, y: number, compType: string, rotation: number): Point {
+  const def = COMPONENT_DEFINITIONS[compType];
+  if (!def || def.pins.length === 0) {
+    // Fallback: snap to grid boundaries
+    const col = Math.round((x - BOARD_X_OFFSET) / GRID_W);
+    const row = Math.round(y / GRID_H);
+    return { x: BOARD_X_OFFSET + col * GRID_W, y: row * GRID_H };
+  }
+
+  // Get the first pin's offset within the component
+  const pin = def.pins[0];
+  const { w, h } = getRenderedSize(def, rotation);
+  const side = rotatedSide(pin.side, rotation);
+  let pinOffX = 0, pinOffY = 0;
+  switch (side) {
+    case 'left':   pinOffX = 0;              pinOffY = h * pin.offset; break;
+    case 'right':  pinOffX = w;              pinOffY = h * pin.offset; break;
+    case 'top':    pinOffX = w * pin.offset; pinOffY = 0;              break;
+    case 'bottom': pinOffX = w * pin.offset; pinOffY = h;              break;
+  }
+
+  // Where should this pin land? Nearest pin hole center.
+  const pinAbsX = x + pinOffX;
+  const pinAbsY = y + pinOffY;
+  const col = Math.round((pinAbsX - BOARD_X_OFFSET - GRID_W / 2) / GRID_W);
+  const row = Math.round((pinAbsY - GRID_H / 2) / GRID_H);
+  const holeX = BOARD_X_OFFSET + col * GRID_W + GRID_W / 2;
+  const holeY = row * GRID_H + GRID_H / 2;
+
+  // Component position = hole position minus pin offset
+  return { x: holeX - pinOffX, y: holeY - pinOffY };
+}
+
+/**
+ * Get the rendered width and height of a component, accounting for rotation.
+ * 90/270 degree rotation swaps width and height.
+ */
+function getRenderedSize(def: { width: number; height: number }, rotation: number): { w: number; h: number } {
+  const isRotated = rotation === 90 || rotation === 270;
   return {
-    x: Math.round(x / GRID_SIZE) * GRID_SIZE,
-    y: Math.round(y / GRID_SIZE) * GRID_SIZE,
+    w: (isRotated ? def.height : def.width) * GRID_W,
+    h: (isRotated ? def.width : def.height) * GRID_H,
   };
+}
+
+/**
+ * Map a pin's side based on component rotation.
+ */
+function rotatedSide(side: 'left' | 'right' | 'top' | 'bottom', rotation: number): 'left' | 'right' | 'top' | 'bottom' {
+  const sides: ('top' | 'right' | 'bottom' | 'left')[] = ['top', 'right', 'bottom', 'left'];
+  const idx = sides.indexOf(side);
+  const steps = Math.round(rotation / 90) % 4;
+  return sides[(idx + steps) % 4];
 }
 
 function getPinPosition(comp: PlacedComponent, pinId: string): Point | null {
@@ -51,11 +112,11 @@ function getPinPosition(comp: PlacedComponent, pinId: string): Point | null {
   const pin = def.pins.find((p) => p.id === pinId);
   if (!pin) return null;
 
-  const w = def.width * GRID_SIZE;
-  const h = def.height * GRID_SIZE;
+  const { w, h } = getRenderedSize(def, comp.rotation);
+  const side = rotatedSide(pin.side, comp.rotation);
 
   let px = 0, py = 0;
-  switch (pin.side) {
+  switch (side) {
     case 'left':   px = 0;  py = h * pin.offset; break;
     case 'right':  px = w;  py = h * pin.offset; break;
     case 'top':    px = w * pin.offset; py = 0;  break;
@@ -72,18 +133,14 @@ interface Rect {
 function getComponentRect(comp: PlacedComponent): Rect {
   const def = COMPONENT_DEFINITIONS[comp.type];
   if (!def) return { x: 0, y: 0, w: 0, h: 0 };
-  return {
-    x: comp.position.x,
-    y: comp.position.y,
-    w: def.width * GRID_SIZE,
-    h: def.height * GRID_SIZE,
-  };
+  const { w, h } = getRenderedSize(def, comp.rotation);
+  return { x: comp.position.x, y: comp.position.y, w, h };
 }
 
 function getPinSide(comp: PlacedComponent, pinId: string): 'left' | 'right' | 'top' | 'bottom' {
   const def = COMPONENT_DEFINITIONS[comp.type];
   const pin = def?.pins.find((p) => p.id === pinId);
-  return pin?.side ?? 'right';
+  return rotatedSide(pin?.side ?? 'right', comp.rotation);
 }
 
 /**
@@ -123,25 +180,32 @@ function routeWire(
   // Obstacle rects (ALL components)
   const obstacles = components.map(getComponentRect);
 
-  // Compute stubs
-  const fromComp = components.find((c) => c.id === fromCompId)!;
-  const toComp = components.find((c) => c.id === toCompId)!;
-  const fromSide = getPinSide(fromComp, fromPinId);
-  const toSide = getPinSide(toComp, toPinId);
+  // Compute stubs — board pin holes don't need stubs (no component body to escape)
+  const fromComp = components.find((c) => c.id === fromCompId);
+  const toComp = components.find((c) => c.id === toCompId);
 
   function stubDir(side: 'left' | 'right' | 'top' | 'bottom'): Point {
     switch (side) {
-      case 'left':   return { x: -GRID_SIZE, y: 0 };
-      case 'right':  return { x: GRID_SIZE,  y: 0 };
-      case 'top':    return { x: 0, y: -GRID_SIZE };
-      case 'bottom': return { x: 0, y: GRID_SIZE };
+      case 'left':   return { x: -GRID_W, y: 0 };
+      case 'right':  return { x: GRID_W,  y: 0 };
+      case 'top':    return { x: 0, y: -GRID_H };
+      case 'bottom': return { x: 0, y: GRID_H };
     }
   }
 
-  const fd = stubDir(fromSide);
-  const td = stubDir(toSide);
-  const a: Point = { x: from.x + fd.x, y: from.y + fd.y }; // stub tip from
-  const b: Point = { x: to.x + td.x,   y: to.y + td.y };   // stub tip to
+  let a: Point, b: Point;
+  if (fromComp) {
+    const fd = stubDir(getPinSide(fromComp, fromPinId));
+    a = { x: from.x + fd.x, y: from.y + fd.y };
+  } else {
+    a = from; // board pin — no stub needed
+  }
+  if (toComp) {
+    const td = stubDir(getPinSide(toComp, toPinId));
+    b = { x: to.x + td.x, y: to.y + td.y };
+  } else {
+    b = to; // board pin — no stub needed
+  }
 
   const priorSegs = existingSegments || [];
 
@@ -196,13 +260,13 @@ function routeWire(
   // Z-shapes (3 segments) at various midpoints
   const midXs = [
     (a.x + b.x) / 2,
-    a.x - GRID_SIZE, a.x + GRID_SIZE,
-    b.x - GRID_SIZE, b.x + GRID_SIZE,
+    a.x - GRID_W, a.x + GRID_W,
+    b.x - GRID_W, b.x + GRID_W,
   ];
   const midYs = [
     (a.y + b.y) / 2,
-    a.y - GRID_SIZE, a.y + GRID_SIZE,
-    b.y - GRID_SIZE, b.y + GRID_SIZE,
+    a.y - GRID_H, a.y + GRID_H,
+    b.y - GRID_H, b.y + GRID_H,
   ];
   for (const mx of midXs) {
     candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
@@ -212,10 +276,13 @@ function routeWire(
   }
 
   // U-shapes going wide
-  const offsets = [GRID_SIZE * 2, GRID_SIZE * 3, -GRID_SIZE * 2, -GRID_SIZE * 3];
-  for (const off of offsets) {
+  const xOffsets = [GRID_W * 2, GRID_W * 3, -GRID_W * 2, -GRID_W * 3];
+  const yOffsets = [GRID_H * 2, GRID_H * 3, -GRID_H * 2, -GRID_H * 3];
+  for (const off of yOffsets) {
     const my = Math.min(a.y, b.y) + off;
     candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
+  }
+  for (const off of xOffsets) {
     const mx = Math.min(a.x, b.x) + off;
     candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
   }
@@ -316,8 +383,35 @@ export default function Breadboard({
   onToggleSwitch,
 }: BreadboardProps) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
+  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number; type: string; rotation: number } | null>(null);
   const [mousePos, setMousePos] = useState<Point | null>(null);
+
+  // Zoom and pan state
+  const [zoom, setZoom] = useState(1);
+  const [panOffset, setPanOffset] = useState<Point>({ x: 0, y: 0 });
+  const isPanning = useRef(false);
+  const panStart = useRef<Point>({ x: 0, y: 0 });
+  const panOffsetStart = useRef<Point>({ x: 0, y: 0 });
+
+  const viewBox = useMemo(() => {
+    const vw = TOTAL_PIXEL_WIDTH / zoom;
+    const vh = BOARD_PIXEL_HEIGHT / zoom;
+    return `${panOffset.x} ${panOffset.y} ${vw} ${vh}`;
+  }, [zoom, panOffset]);
+
+  // Resolve a wire endpoint to pixel coordinates
+  function getEndpointPos(endpoint: { componentId: string; pinId: string }): Point | null {
+    if (endpoint.componentId === 'board') {
+      const [colStr, rowStr] = endpoint.pinId.split(',');
+      const col = parseInt(colStr, 10);
+      const row = parseInt(rowStr, 10);
+      const { x, y } = gridToPixel(col, row);
+      return { x, y };
+    }
+    const comp = components.find((c) => c.id === endpoint.componentId);
+    if (!comp) return null;
+    return getPinPosition(comp, endpoint.pinId);
+  }
 
   // Pre-compute routed wire paths; each wire avoids overlapping prior wires
   const routedWires = useMemo(() => {
@@ -325,11 +419,8 @@ export default function Breadboard({
     const results: { wire: Wire; path: string }[] = [];
 
     for (const wire of wires) {
-      const fromComp = components.find((c) => c.id === wire.from.componentId);
-      const toComp = components.find((c) => c.id === wire.to.componentId);
-      if (!fromComp || !toComp) continue;
-      const fromPos = getPinPosition(fromComp, wire.from.pinId);
-      const toPos = getPinPosition(toComp, wire.to.pinId);
+      const fromPos = getEndpointPos(wire.from);
+      const toPos = getEndpointPos(wire.to);
       if (!fromPos || !toPos) continue;
 
       const points = routeWire(fromPos, toPos, components,
@@ -337,7 +428,6 @@ export default function Breadboard({
         wire.to.componentId, wire.to.pinId,
         allSegments);
 
-      // Record this wire's segments for subsequent wires to avoid
       const clean = cleanPoints(points);
       for (let i = 0; i < clean.length - 1; i++) {
         allSegments.push({ ax: clean[i].x, ay: clean[i].y, bx: clean[i + 1].x, by: clean[i + 1].y });
@@ -352,11 +442,8 @@ export default function Breadboard({
   // Compute preview wire path while wiring
   const previewPath = useMemo(() => {
     if (!wiringFrom || !mousePos) return null;
-    const fromComp = components.find((c) => c.id === wiringFrom.componentId);
-    if (!fromComp) return null;
-    const fromPos = getPinPosition(fromComp, wiringFrom.pinId);
+    const fromPos = getEndpointPos(wiringFrom);
     if (!fromPos) return null;
-    // Simple L-route to cursor
     const midX = mousePos.x;
     const points: Point[] = [fromPos, { x: midX, y: fromPos.y }, { x: midX, y: mousePos.y }, mousePos];
     return pointsToPathD(points);
@@ -365,13 +452,13 @@ export default function Breadboard({
   const getSVGCoords = useCallback((e: React.MouseEvent): Point => {
     const svg = svgRef.current!;
     const rect = svg.getBoundingClientRect();
-    const scaleX = TOTAL_WIDTH / rect.width;
-    const scaleY = BOARD_HEIGHT / rect.height;
+    const vw = TOTAL_PIXEL_WIDTH / zoom;
+    const vh = BOARD_PIXEL_HEIGHT / zoom;
     return {
-      x: (e.clientX - rect.left) * scaleX,
-      y: (e.clientY - rect.top) * scaleY,
+      x: panOffset.x + (e.clientX - rect.left) / rect.width * vw,
+      y: panOffset.y + (e.clientY - rect.top) / rect.height * vh,
     };
-  }, []);
+  }, [zoom, panOffset]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -384,15 +471,14 @@ export default function Breadboard({
       if (!type) return;
       const svg = svgRef.current!;
       const rect = svg.getBoundingClientRect();
-      const scaleX = TOTAL_WIDTH / rect.width;
-      const scaleY = BOARD_HEIGHT / rect.height;
-      const pos = snapToGrid(
-        (e.clientX - rect.left) * scaleX,
-        (e.clientY - rect.top) * scaleY,
-      );
+      const vw = TOTAL_PIXEL_WIDTH / zoom;
+      const vh = BOARD_PIXEL_HEIGHT / zoom;
+      const svgX = panOffset.x + (e.clientX - rect.left) / rect.width * vw;
+      const svgY = panOffset.y + (e.clientY - rect.top) / rect.height * vh;
+      const pos = snapComponentToGrid(svgX, svgY, type, 0);
       onDropComponent(type, pos);
     },
-    [onDropComponent]
+    [onDropComponent, zoom, panOffset]
   );
 
   const handleComponentMouseDown = useCallback(
@@ -408,6 +494,8 @@ export default function Breadboard({
           id: compId,
           offsetX: coords.x - comp.position.x,
           offsetY: coords.y - comp.position.y,
+          type: comp.type,
+          rotation: comp.rotation,
         };
       }
     },
@@ -416,20 +504,41 @@ export default function Breadboard({
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent) => {
+      // Handle panning
+      if (isPanning.current) {
+        const svg = svgRef.current!;
+        const rect = svg.getBoundingClientRect();
+        const vw = TOTAL_PIXEL_WIDTH / zoom;
+        const vh = BOARD_PIXEL_HEIGHT / zoom;
+        const dx = (e.clientX - panStart.current.x) / rect.width * vw;
+        const dy = (e.clientY - panStart.current.y) / rect.height * vh;
+        setPanOffset({
+          x: panOffsetStart.current.x - dx,
+          y: panOffsetStart.current.y - dy,
+        });
+        return;
+      }
+
       const coords = getSVGCoords(e);
       if (wiringFrom) {
         setMousePos(coords);
       }
       if (dragRef.current) {
-        const pos = snapToGrid(coords.x - dragRef.current.offsetX, coords.y - dragRef.current.offsetY);
+        const pos = snapComponentToGrid(
+          coords.x - dragRef.current.offsetX,
+          coords.y - dragRef.current.offsetY,
+          dragRef.current.type,
+          dragRef.current.rotation,
+        );
         onMoveComponent(dragRef.current.id, pos);
       }
     },
-    [getSVGCoords, onMoveComponent, wiringFrom]
+    [getSVGCoords, onMoveComponent, wiringFrom, zoom]
   );
 
   const handleMouseUp = useCallback(() => {
     dragRef.current = null;
+    isPanning.current = false;
   }, []);
 
   const handlePinMouseDown = useCallback(
@@ -457,6 +566,15 @@ export default function Breadboard({
   );
 
   const handleBoardMouseDown = useCallback((e: React.MouseEvent) => {
+    // Ctrl+click to pan
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      isPanning.current = true;
+      panStart.current = { x: e.clientX, y: e.clientY };
+      panOffsetStart.current = { ...panOffset };
+      return;
+    }
+
     const isBackground = e.target === svgRef.current ||
       ((e.target as SVGElement).tagName === 'rect' && !(e.target as SVGElement).closest('.component'));
     if (!isBackground) return;
@@ -469,72 +587,209 @@ export default function Breadboard({
 
     onSelectComponent(null);
     onSelectWire(null);
-  }, [onSelectComponent, onSelectWire, wiringFrom, onStartWire]);
+  }, [onSelectComponent, onSelectWire, wiringFrom, onStartWire, panOffset]);
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const svg = svgRef.current!;
+    const rect = svg.getBoundingClientRect();
+
+    // Mouse position in SVG coords before zoom
+    const vw = TOTAL_PIXEL_WIDTH / zoom;
+    const vh = BOARD_PIXEL_HEIGHT / zoom;
+    const mx = panOffset.x + (e.clientX - rect.left) / rect.width * vw;
+    const my = panOffset.y + (e.clientY - rect.top) / rect.height * vh;
+
+    // Zoom in/out
+    const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newZoom = Math.max(0.3, Math.min(10, zoom * zoomFactor));
+
+    // Adjust pan so the point under the cursor stays fixed
+    const newVw = TOTAL_PIXEL_WIDTH / newZoom;
+    const newVh = BOARD_PIXEL_HEIGHT / newZoom;
+    const cursorFracX = (e.clientX - rect.left) / rect.width;
+    const cursorFracY = (e.clientY - rect.top) / rect.height;
+
+    setPanOffset({
+      x: mx - cursorFracX * newVw,
+      y: my - cursorFracY * newVh,
+    });
+    setZoom(newZoom);
+  }, [zoom, panOffset]);
+
+  const handleBoardPinMouseDown = useCallback(
+    (col: number, row: number, e: React.MouseEvent) => {
+      e.stopPropagation();
+      const boardPinId = `${col},${row}`;
+      if (!wiringFrom) {
+        onStartWire('board', boardPinId);
+      } else {
+        onEndWire('board', boardPinId);
+        setMousePos(null);
+      }
+    },
+    [wiringFrom, onStartWire, onEndWire]
+  );
+
+  // Build pin hole elements for all breadboards
+  const pinHoles = useMemo(() => {
+    const holes: JSX.Element[] = [];
+    for (let col = 0; col < BOARD_TOTAL_COLS; col++) {
+      if (isGapColumn(col)) continue;
+      for (let row = 0; row < TOTAL_ROWS; row++) {
+        const { x, y } = gridToPixel(col, row);
+        // Determine if this is a rail column on any board
+        let isPositiveRail = false;
+        let isNegativeRail = false;
+        for (let bi = 0; bi < NUM_BOARDS; bi++) {
+          const bc = boardColumns(bi);
+          if (col === bc.leftRailStart || col === bc.rightRailStart) isPositiveRail = true;
+          if (col === bc.leftRailStart + 1 || col === bc.rightRailStart + 1) isNegativeRail = true;
+        }
+        const isRail = isPositiveRail || isNegativeRail;
+        const color = isPositiveRail ? '#ef444466' : isNegativeRail ? '#3b82f666' : '#1a1a1a';
+        holes.push(
+          <circle
+            key={`hole-${col}-${row}`}
+            cx={x}
+            cy={y}
+            r={2.5}
+            fill={color}
+            stroke={isRail ? (isPositiveRail ? '#ef444455' : '#3b82f655') : '#00000022'}
+            strokeWidth={0.5}
+            className="pin-hole"
+            onMouseDown={(e) => handleBoardPinMouseDown(col, row, e)}
+          />
+        );
+      }
+    }
+    return holes;
+  }, [handleBoardPinMouseDown]);
+
+  // Draw connection traces for all boards
+  const groupTraces = useMemo(() => {
+    const traces: JSX.Element[] = [];
+
+    for (let bi = 0; bi < NUM_BOARDS; bi++) {
+      const bc = boardColumns(bi);
+
+      // Component area horizontal traces (left and right halves)
+      for (const startCol of [bc.leftCompStart, bc.rightCompStart]) {
+        for (let row = 0; row < TOTAL_ROWS; row++) {
+          const p1 = gridToPixel(startCol, row);
+          const p2 = gridToPixel(startCol + COMP_COLS - 1, row);
+          traces.push(
+            <line
+              key={`trace-comp-${bi}-${startCol}-${row}`}
+              x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
+              stroke="#b0a898" strokeWidth={1} opacity={0.4}
+            />
+          );
+        }
+      }
+
+      // Power rail vertical traces (2×5 groups)
+      for (const railCol of [bc.leftRailStart, bc.rightRailStart]) {
+        for (let g = 0; g < TOTAL_ROWS / RAIL_GROUP_SIZE; g++) {
+          const startRow = g * RAIL_GROUP_SIZE;
+          const endRow = startRow + RAIL_GROUP_SIZE - 1;
+          const pp1 = gridToPixel(railCol, startRow);
+          const pp2 = gridToPixel(railCol, endRow);
+          traces.push(
+            <line
+              key={`trace-rail-pos-${bi}-${railCol}-${g}`}
+              x1={pp1.x} y1={pp1.y} x2={pp2.x} y2={pp2.y}
+              stroke="#ef4444" strokeWidth={1} opacity={0.15}
+            />
+          );
+          const np1 = gridToPixel(railCol + 1, startRow);
+          const np2 = gridToPixel(railCol + 1, endRow);
+          traces.push(
+            <line
+              key={`trace-rail-neg-${bi}-${railCol}-${g}`}
+              x1={np1.x} y1={np1.y} x2={np2.x} y2={np2.y}
+              stroke="#3b82f6" strokeWidth={1} opacity={0.15}
+            />
+          );
+          for (let r = startRow; r <= endRow; r++) {
+            const lp = gridToPixel(railCol, r);
+            const rp = gridToPixel(railCol + 1, r);
+            traces.push(
+              <line
+                key={`trace-rail-h-${bi}-${railCol}-${r}`}
+                x1={lp.x} y1={lp.y} x2={rp.x} y2={rp.y}
+                stroke="#b0a898" strokeWidth={0.5} opacity={0.3}
+              />
+            );
+          }
+        }
+      }
+    }
+
+    return traces;
+  }, []);
+
+  // Rail labels for all boards
+  const railLabels = useMemo(() => {
+    const labels: JSX.Element[] = [];
+    for (let bi = 0; bi < NUM_BOARDS; bi++) {
+      const bc = boardColumns(bi);
+      for (const railCol of [bc.leftRailStart, bc.rightRailStart]) {
+        const px = gridToPixel(railCol, 0);
+        const nx = gridToPixel(railCol + 1, 0);
+        labels.push(
+          <text key={`rl-p-${bi}-${railCol}`} x={px.x} y={px.y - 8} textAnchor="middle" fill="#ef4444" fontSize={8} fontWeight="bold">+</text>,
+          <text key={`rl-n-${bi}-${railCol}`} x={nx.x} y={nx.y - 8} textAnchor="middle" fill="#3b82f6" fontSize={8} fontWeight="bold">-</text>,
+        );
+      }
+    }
+    return labels;
+  }, []);
 
   return (
     <svg
       ref={svgRef}
       className="breadboard-svg"
-      viewBox={`0 0 ${TOTAL_WIDTH} ${BOARD_HEIGHT}`}
+      viewBox={viewBox}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
+      onWheel={handleWheel}
       onMouseDown={handleBoardMouseDown}
     >
       {/* Supply area background */}
-      <rect x={0} y={0} width={SUPPLY_WIDTH} height={BOARD_HEIGHT} fill="#0b1120" rx={8} />
+      <rect x={0} y={0} width={SUPPLY_WIDTH} height={BOARD_PIXEL_HEIGHT} fill="#0b1120" rx={8} />
       <text x={SUPPLY_WIDTH / 2} y={20} textAnchor="middle" fill="#475569" fontSize={10} fontWeight="600">POWER</text>
 
-      {/* Breadboard background */}
-      <rect x={BOARD_X} y={0} width={BOARD_WIDTH} height={BOARD_HEIGHT} fill="#1e293b" rx={8} />
+      {/* Breadboard backgrounds and gaps */}
+      {Array.from({ length: NUM_BOARDS }).map((_, bi) => {
+        const off = boardColOffset(bi);
+        const bx = BOARD_X_OFFSET + off * GRID_W;
+        const bw = SINGLE_BOARD_COLS * GRID_W;
+        return (
+          <g key={`board-${bi}`}>
+            <rect x={bx} y={0} width={bw} height={BOARD_PIXEL_HEIGHT} fill="#b5ac9d" rx={8} />
+            {/* Center gap */}
+            <rect
+              x={BOARD_X_OFFSET + (off + REL_COL_GAP) * GRID_W}
+              y={0}
+              width={GRID_W}
+              height={BOARD_PIXEL_HEIGHT}
+              fill="#9d9486"
+            />
+          </g>
+        );
+      })}
 
-      {/* Grid dots on breadboard */}
-      {Array.from({ length: BOARD_COLS }).map((_, col) =>
-        Array.from({ length: BOARD_ROWS }).map((_, row) => (
-          <circle
-            key={`${col}-${row}`}
-            cx={BOARD_X + col * GRID_SIZE + GRID_SIZE / 2}
-            cy={row * GRID_SIZE + GRID_SIZE / 2}
-            r={1.5}
-            fill="#334155"
-          />
-        ))
-      )}
+      {/* Connection traces (underneath pin holes) */}
+      {groupTraces}
 
-      {/* Power rails on breadboard */}
-      {[POWER_RAIL_TOP, POWER_RAIL_BOTTOM].map((row) => (
-        <line
-          key={`pwr-${row}`}
-          x1={BOARD_X + GRID_SIZE}
-          y1={row * GRID_SIZE + GRID_SIZE / 2}
-          x2={BOARD_X + BOARD_WIDTH - GRID_SIZE}
-          y2={row * GRID_SIZE + GRID_SIZE / 2}
-          stroke="#ef4444"
-          strokeWidth={2}
-          strokeDasharray="4 4"
-          opacity={0.4}
-        />
-      ))}
-      {[GROUND_RAIL_TOP, GROUND_RAIL_BOTTOM].map((row) => (
-        <line
-          key={`gnd-${row}`}
-          x1={BOARD_X + GRID_SIZE}
-          y1={row * GRID_SIZE + GRID_SIZE / 2}
-          x2={BOARD_X + BOARD_WIDTH - GRID_SIZE}
-          y2={row * GRID_SIZE + GRID_SIZE / 2}
-          stroke="#3b82f6"
-          strokeWidth={2}
-          strokeDasharray="4 4"
-          opacity={0.4}
-        />
-      ))}
+      {/* Pin holes */}
+      {pinHoles}
 
       {/* Rail labels */}
-      <text x={BOARD_X + 4} y={POWER_RAIL_TOP * GRID_SIZE + GRID_SIZE / 2 + 4} fill="#ef4444" fontSize={10} fontWeight="bold">+</text>
-      <text x={BOARD_X + 4} y={GROUND_RAIL_TOP * GRID_SIZE + GRID_SIZE / 2 + 4} fill="#3b82f6" fontSize={10} fontWeight="bold">-</text>
-      <text x={BOARD_X + 4} y={POWER_RAIL_BOTTOM * GRID_SIZE + GRID_SIZE / 2 + 4} fill="#ef4444" fontSize={10} fontWeight="bold">+</text>
-      <text x={BOARD_X + 4} y={GROUND_RAIL_BOTTOM * GRID_SIZE + GRID_SIZE / 2 + 4} fill="#3b82f6" fontSize={10} fontWeight="bold">-</text>
+      {railLabels}
 
       {/* Wires — routed orthogonally */}
       {routedWires.map(({ wire, path }) => (
@@ -580,9 +835,15 @@ export default function Breadboard({
       {components.map((comp) => {
         const def = COMPONENT_DEFINITIONS[comp.type];
         if (!def) return null;
-        const w = def.width * GRID_SIZE;
-        const h = def.height * GRID_SIZE;
+        const { w, h } = getRenderedSize(def, comp.rotation);
         const isSelected = comp.id === selectedComponentId;
+        const ledColorMap: Record<string, string> = {
+          red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308',
+          white: '#f1f5f9', orange: '#f97316', purple: '#a855f7',
+        };
+        const ledColor = comp.type === 'led'
+          ? ledColorMap[comp.properties.color as string] || def.color
+          : def.color;
         const isLedOn = comp.type === 'led' && comp.state?.on;
         const isSwitchClosed = comp.type === 'switch' && comp.state?.closed;
         const isTimerHigh = comp.type === 'timer' && comp.state?.outputHigh;
@@ -592,10 +853,16 @@ export default function Breadboard({
             key={comp.id}
             transform={`translate(${comp.position.x}, ${comp.position.y})`}
             className={`component ${comp.type === 'switch' ? 'clickable' : ''}`}
-            onMouseDown={(e) => { if (!wiringFrom) e.stopPropagation(); handleComponentMouseDown(e, comp.id); }}
-            onDoubleClick={(e) => {
-              e.stopPropagation();
-              if (comp.type === 'switch') onToggleSwitch(comp.id);
+            onMouseDown={(e) => {
+              if (!wiringFrom) e.stopPropagation();
+              if (comp.type === 'switch') {
+                e.stopPropagation();
+                onToggleSwitch(comp.id);
+                onSelectComponent(comp.id);
+                onSelectWire(null);
+                return;
+              }
+              handleComponentMouseDown(e, comp.id);
             }}
           >
             {/* Selection highlight */}
@@ -604,18 +871,112 @@ export default function Breadboard({
             )}
 
             {/* Component body */}
-            {comp.type === 'led' ? (
+            {comp.type === 'resistor' ? (() => {
+              // Resistor: narrow body with lead wires
+              const isVert = comp.rotation === 0 || comp.rotation === 180;
+              const bodyW = isVert ? w * 0.5 : w * 0.6;
+              const bodyH = isVert ? h * 0.5 : h * 0.5;
+              const bx = (w - bodyW) / 2;
+              const by = (h - bodyH) / 2;
+              return (
+                <>
+                  {/* Lead wires */}
+                  <line
+                    x1={w / 2} y1={isVert ? 0 : h / 2}
+                    x2={w / 2} y2={isVert ? by : h / 2}
+                    stroke="#94a3b8" strokeWidth={1.5}
+                  />
+                  <line
+                    x1={isVert ? w / 2 : 0} y1={isVert ? by + bodyH : h / 2}
+                    x2={isVert ? w / 2 : bx} y2={isVert ? h : h / 2}
+                    stroke="#94a3b8" strokeWidth={1.5}
+                  />
+                  {!isVert && (
+                    <>
+                      <line x1={0} y1={h / 2} x2={bx} y2={h / 2} stroke="#94a3b8" strokeWidth={1.5} />
+                      <line x1={bx + bodyW} y1={h / 2} x2={w} y2={h / 2} stroke="#94a3b8" strokeWidth={1.5} />
+                    </>
+                  )}
+                  {/* Resistor body */}
+                  <rect
+                    x={bx} y={by}
+                    width={bodyW} height={bodyH}
+                    fill={def.color}
+                    stroke={def.color}
+                    strokeWidth={1}
+                    rx={3}
+                  />
+                  {/* Color bands */}
+                  {isVert ? (
+                    <>
+                      <line x1={bx + 2} y1={by + bodyH * 0.2} x2={bx + bodyW - 2} y2={by + bodyH * 0.2} stroke="#5c4a0e" strokeWidth={2} />
+                      <line x1={bx + 2} y1={by + bodyH * 0.4} x2={bx + bodyW - 2} y2={by + bodyH * 0.4} stroke="#1a1a1a" strokeWidth={2} />
+                      <line x1={bx + 2} y1={by + bodyH * 0.6} x2={bx + bodyW - 2} y2={by + bodyH * 0.6} stroke="#b91c1c" strokeWidth={2} />
+                      <line x1={bx + 2} y1={by + bodyH * 0.8} x2={bx + bodyW - 2} y2={by + bodyH * 0.8} stroke="#d4af37" strokeWidth={1.5} />
+                    </>
+                  ) : (
+                    <>
+                      <line x1={bx + bodyW * 0.2} y1={by + 2} x2={bx + bodyW * 0.2} y2={by + bodyH - 2} stroke="#5c4a0e" strokeWidth={2} />
+                      <line x1={bx + bodyW * 0.4} y1={by + 2} x2={bx + bodyW * 0.4} y2={by + bodyH - 2} stroke="#1a1a1a" strokeWidth={2} />
+                      <line x1={bx + bodyW * 0.6} y1={by + 2} x2={bx + bodyW * 0.6} y2={by + bodyH - 2} stroke="#b91c1c" strokeWidth={2} />
+                      <line x1={bx + bodyW * 0.8} y1={by + 2} x2={bx + bodyW * 0.8} y2={by + bodyH - 2} stroke="#d4af37" strokeWidth={1.5} />
+                    </>
+                  )}
+                </>
+              );
+            })() : comp.type === 'capacitor' ? (() => {
+              // Electrolytic capacitor: cylindrical body with lead wires and plates
+              const isVert = comp.rotation === 0 || comp.rotation === 180;
+              const bodyR = Math.min(w, h) * 0.4;
+              const cx = w / 2;
+              const cy = h / 2;
+              return (
+                <>
+                  {/* Lead wires */}
+                  {isVert ? (
+                    <>
+                      <line x1={cx} y1={0} x2={cx} y2={cy - bodyR * 0.6} stroke="#94a3b8" strokeWidth={1.5} />
+                      <line x1={cx} y1={cy + bodyR * 0.6} x2={cx} y2={h} stroke="#94a3b8" strokeWidth={1.5} />
+                    </>
+                  ) : (
+                    <>
+                      <line x1={0} y1={cy} x2={cx - bodyR * 0.6} y2={cy} stroke="#94a3b8" strokeWidth={1.5} />
+                      <line x1={cx + bodyR * 0.6} y1={cy} x2={w} y2={cy} stroke="#94a3b8" strokeWidth={1.5} />
+                    </>
+                  )}
+                  {/* Capacitor body (cylinder) */}
+                  <circle cx={cx} cy={cy} r={bodyR} fill={def.color} stroke="#2563eb" strokeWidth={1} />
+                  {/* Plate lines */}
+                  {isVert ? (
+                    <>
+                      <line x1={cx - bodyR * 0.5} y1={cy - 1.5} x2={cx + bodyR * 0.5} y2={cy - 1.5} stroke="#e2e8f0" strokeWidth={1} />
+                      <path d={`M ${cx - bodyR * 0.5} ${cy + 1.5} Q ${cx} ${cy + 4} ${cx + bodyR * 0.5} ${cy + 1.5}`} stroke="#e2e8f0" strokeWidth={1} fill="none" />
+                    </>
+                  ) : (
+                    <>
+                      <line x1={cx - 1.5} y1={cy - bodyR * 0.5} x2={cx - 1.5} y2={cy + bodyR * 0.5} stroke="#e2e8f0" strokeWidth={1} />
+                      <path d={`M ${cx + 1.5} ${cy - bodyR * 0.5} Q ${cx + 4} ${cy} ${cx + 1.5} ${cy + bodyR * 0.5}`} stroke="#e2e8f0" strokeWidth={1} fill="none" />
+                    </>
+                  )}
+                  {/* + marker near positive pin */}
+                  <text
+                    x={isVert ? cx + bodyR * 0.3 : cx - bodyR * 0.3}
+                    y={isVert ? cy - bodyR * 0.2 : cy - bodyR * 0.3}
+                    fill="#e2e8f0" fontSize={4} fontWeight="700" textAnchor="middle" pointerEvents="none"
+                  >+</text>
+                </>
+              );
+            })() : comp.type === 'led' ? (
               <>
-                {/* LED as circle */}
                 {isLedOn && (
-                  <circle cx={w / 2} cy={h / 2} r={w / 2 + 8} fill={def.color} opacity={0.25} />
+                  <circle cx={w / 2} cy={h / 2} r={w / 2 + 8} fill={ledColor} opacity={0.6} />
                 )}
                 <circle
                   cx={w / 2}
                   cy={h / 2}
                   r={w / 2 - 1}
-                  fill={isLedOn ? def.color : def.color + '33'}
-                  stroke={def.color}
+                  fill={ledColor}
+                  stroke={ledColor}
                   strokeWidth={1.5}
                 />
               </>
@@ -623,22 +984,26 @@ export default function Breadboard({
               <rect
                 width={w}
                 height={h}
-                fill={isTimerHigh ? def.color + '88' : isSwitchClosed ? def.color + '66' : def.color + '33'}
-                stroke={isSwitchClosed ? '#4ade80' : def.color}
+                fill={comp.type === 'timer' || comp.type === 'switch' ? def.color : isTimerHigh ? def.color + '88' : def.color + '33'}
+                stroke={def.color}
                 strokeWidth={1.5}
                 rx={4}
               />
             )}
 
-            {/* Switch state indicator */}
+            {/* Switch state: show 0 or 1 */}
             {comp.type === 'switch' && (
-              <line
-                x1={4} y1={h / 2}
-                x2={w - 4} y2={isSwitchClosed ? h / 2 : h / 2 - 8}
-                stroke={isSwitchClosed ? '#4ade80' : '#94a3b8'}
-                strokeWidth={2}
-                strokeLinecap="round"
-              />
+              <text
+                x={w / 2}
+                y={h / 2 + 2}
+                textAnchor="middle"
+                fill={isSwitchClosed ? '#4ade80' : '#ef4444'}
+                fontSize={6}
+                fontWeight="700"
+                pointerEvents="none"
+              >
+                {isSwitchClosed ? '1' : '0'}
+              </text>
             )}
 
             {/* Waveform icon on power supply */}
@@ -662,24 +1027,24 @@ export default function Breadboard({
             {comp.type === 'timer' && (
               <>
                 {/* Pin 1 notch */}
-                <circle cx={w / 2} cy={h} r={4} fill="#0f172a" stroke="#f472b6" strokeWidth={1} opacity={0.6} />
+                <circle cx={w / 2} cy={h} r={3} fill="#0f172a" stroke="#888" strokeWidth={0.5} opacity={0.6} />
                 {/* Internal pin labels — left side (1-4, bottom to top) */}
-                <text x={6} y={h * 0.875 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" pointerEvents="none">1 GND</text>
-                <text x={6} y={h * 0.625 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" pointerEvents="none">2 TRIG</text>
-                <text x={6} y={h * 0.375 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" pointerEvents="none">3 OUT</text>
-                <text x={6} y={h * 0.125 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" pointerEvents="none">4 RST</text>
+                <text x={5} y={h * 0.875 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">1 GND</text>
+                <text x={5} y={h * 0.625 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">2 TRG</text>
+                <text x={5} y={h * 0.375 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">3 OUT</text>
+                <text x={5} y={h * 0.125 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">4 RST</text>
                 {/* Internal pin labels — right side (5-8, bottom to top) */}
-                <text x={w - 6} y={h * 0.875 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" textAnchor="end" pointerEvents="none">CTRL 5</text>
-                <text x={w - 6} y={h * 0.625 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" textAnchor="end" pointerEvents="none">THR 6</text>
-                <text x={w - 6} y={h * 0.375 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" textAnchor="end" pointerEvents="none">DIS 7</text>
-                <text x={w - 6} y={h * 0.125 + 3} fill="#e2e8f0" fontSize={7} fontWeight="500" textAnchor="end" pointerEvents="none">VCC 8</text>
+                <text x={w - 5} y={h * 0.875 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">CTL 5</text>
+                <text x={w - 5} y={h * 0.625 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">THR 6</text>
+                <text x={w - 5} y={h * 0.375 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">DIS 7</text>
+                <text x={w - 5} y={h * 0.125 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">VCC 8</text>
                 {/* Output indicator LED */}
-                <circle cx={w / 2} cy={8} r={3} fill={isTimerHigh ? '#4ade80' : '#334155'} />
+                <circle cx={w / 2} cy={6} r={2} fill={isTimerHigh ? '#4ade80' : '#334155'} />
               </>
             )}
 
-            {/* Label (skip for LED — too small) */}
-            {comp.type !== 'led' && (
+            {/* Label (skip for LED, resistor, capacitor, switch — they show values/state instead) */}
+            {comp.type !== 'led' && comp.type !== 'resistor' && comp.type !== 'capacitor' && comp.type !== 'switch' && (
               <text
                 x={w / 2}
                 y={comp.type === 'power' ? h / 2 - 2 : h / 2 + 4}
@@ -690,6 +1055,36 @@ export default function Breadboard({
                 pointerEvents="none"
               >
                 {comp.type === 'power' ? `${comp.properties.mode || 'DC'}` : def.label}
+              </text>
+            )}
+
+            {/* Resistor value label — centered over the body */}
+            {comp.type === 'resistor' && (
+              <text
+                x={w / 2}
+                y={h / 2 + 1.5}
+                textAnchor="middle"
+                fill="#e2e8f0"
+                fontSize={4}
+                fontWeight="600"
+                pointerEvents="none"
+              >
+                {comp.properties.resistance}{def.properties?.resistance?.unit || 'Ω'}
+              </text>
+            )}
+
+            {/* Capacitor value label */}
+            {comp.type === 'capacitor' && (
+              <text
+                x={w / 2}
+                y={h / 2 + 1.5}
+                textAnchor="middle"
+                fill="#e2e8f0"
+                fontSize={3.5}
+                fontWeight="600"
+                pointerEvents="none"
+              >
+                {comp.properties.capacitance}{def.properties?.capacitance?.unit || 'μF'}
               </text>
             )}
 
@@ -710,8 +1105,9 @@ export default function Breadboard({
 
             {/* Pins */}
             {def.pins.map((pin) => {
+              const side = rotatedSide(pin.side, comp.rotation);
               let px = 0, py = 0;
-              switch (pin.side) {
+              switch (side) {
                 case 'left':   px = 0;  py = h * pin.offset; break;
                 case 'right':  px = w;  py = h * pin.offset; break;
                 case 'top':    px = w * pin.offset; py = 0;  break;
@@ -721,11 +1117,11 @@ export default function Breadboard({
               const inset = 8;
               let lx = px, ly = py;
               let anchor: 'start' | 'middle' | 'end' = 'middle';
-              switch (pin.side) {
+              switch (side) {
                 case 'left':   lx = px + inset; anchor = 'start'; break;
                 case 'right':  lx = px - inset; anchor = 'end'; break;
-                case 'top':    ly = py + inset + 3; break;
-                case 'bottom': ly = py - inset; break;
+                case 'top':    ly = py + inset + 3 - (comp.type === 'resistor' ? 3 : comp.type === 'led' ? 1 : 0); break;
+                case 'bottom': ly = py - inset - (comp.type === 'resistor' ? 3 : comp.type === 'led' ? 4 : 0); break;
               }
 
               return (
@@ -748,8 +1144,9 @@ export default function Breadboard({
                       x={lx}
                       y={ly + 3}
                       textAnchor={anchor}
-                      fill="#94a3b8"
-                      fontSize={7}
+                      fill={comp.type === 'resistor' ? '#e2e8f0' : '#94a3b8'}
+                      fontSize={comp.type === 'resistor' ? 3.5 : 7}
+                      display={comp.type === 'switch' ? 'none' : undefined}
                       pointerEvents="none"
                     >
                       {pin.label}
