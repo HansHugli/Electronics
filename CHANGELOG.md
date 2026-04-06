@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.6](https://github.com/HansHugli/Electronics/compare/v0.1.5...v0.1.6) (2026-04-06)
+
+
+### Features
+
+* fix 555 astable topology, add AVR blink demo, and UX polish ([57d15c2](https://github.com/HansHugli/Electronics/commit/57d15c289a744a8e7e202aef328361bdd5fd8561))
+
 ## [0.1.5](https://github.com/HansHugli/Electronics/compare/v0.1.4...v0.1.5) (2026-04-06)
 
 
