@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
-const isDev = process.env.NODE_ENV !== 'production';
+const isDev = !app.isPackaged;
 
 // ---- Config & Data Paths ---- //
 
@@ -171,7 +171,7 @@ function createMainWindow() {
   if (isDev) {
     mainWindow.loadURL('http://localhost:5174');
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../index.html'));
   }
 
   // Open devtools with Ctrl+Shift+I (not by default)
