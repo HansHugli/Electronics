@@ -3,15 +3,23 @@ import {
   avrInstruction,
   AVRIOPort,
   AVRTimer,
+  AVRUSART,
+  AVRSPI,
+  AVRTWI,
+  AVRADC,
   portBConfig,
   portCConfig,
   portDConfig,
   timer0Config,
   timer1Config,
   timer2Config,
+  usart0Config,
+  spiConfig,
+  twiConfig,
+  adcConfig,
   PinState,
 } from 'avr8js';
-import { parse as parseHex } from 'intel-hex';
+// Inline Intel HEX parser (no Node Buffer dependency)
 
 /**
  * Arduino pin number → AVR port/bit mapping (ATmega328P).
@@ -38,12 +46,46 @@ function arduinoPinToPort(pin: number): { port: 'B' | 'C' | 'D'; bit: number } {
 
 /**
  * Parse an Intel HEX string into a Uint16Array suitable for avr8js CPU.
+ * Pure JS implementation — no Node Buffer dependency.
  */
 export function loadHexFile(hexString: string): Uint16Array {
-  const { data } = parseHex(hexString);
-  const progMem = new Uint16Array(data.length / 2);
-  for (let i = 0; i < data.length; i += 2) {
-    progMem[i / 2] = data[i] | (data[i + 1] << 8); // little-endian
+  const bytes: number[] = [];
+  let baseAddr = 0;
+  let maxAddr = 0;
+
+  for (const line of hexString.split(/\r?\n/)) {
+    if (!line.startsWith(':') || line.length < 11) continue;
+    const byteCount = parseInt(line.substring(1, 3), 16);
+    const addr = parseInt(line.substring(3, 7), 16);
+    const type = parseInt(line.substring(7, 9), 16);
+
+    if (type === 0) {
+      // Data record
+      const fullAddr = baseAddr + addr;
+      for (let i = 0; i < byteCount; i++) {
+        const b = parseInt(line.substring(9 + i * 2, 11 + i * 2), 16);
+        const a = fullAddr + i;
+        while (bytes.length <= a) bytes.push(0);
+        bytes[a] = b;
+        if (a + 1 > maxAddr) maxAddr = a + 1;
+      }
+    } else if (type === 2) {
+      // Extended segment address
+      baseAddr = parseInt(line.substring(9, 13), 16) << 4;
+    } else if (type === 4) {
+      // Extended linear address
+      baseAddr = parseInt(line.substring(9, 13), 16) << 16;
+    } else if (type === 1) {
+      // EOF
+      break;
+    }
+  }
+
+  // Pad to even length
+  if (maxAddr % 2 !== 0) maxAddr++;
+  const progMem = new Uint16Array(maxAddr / 2);
+  for (let i = 0; i < maxAddr; i += 2) {
+    progMem[i / 2] = (bytes[i] ?? 0) | ((bytes[i + 1] ?? 0) << 8); // little-endian
   }
   return progMem;
 }
@@ -59,6 +101,8 @@ export interface AVRPinStates {
  * Manages an AVR CPU instance and its peripherals.
  * Acts as the bridge between avr8js and our circuit simulator.
  */
+const MAX_SERIAL_BUFFER = 1024;
+
 export class AVRBridge {
   cpu: CPU | null = null;
   portB: AVRIOPort | null = null;
@@ -67,11 +111,24 @@ export class AVRBridge {
   private timer0: AVRTimer | null = null;
   private timer1: AVRTimer | null = null;
   private timer2: AVRTimer | null = null;
+  private usart: AVRUSART | null = null;
+  private spi: AVRSPI | null = null;
+  private twi: AVRTWI | null = null;
+  private adc: AVRADC | null = null;
   private clockFreq = 16_000_000; // 16 MHz
   private loaded = false;
 
   /** Current output pin states (updated each tick). */
   pinStates = new Map<string, PinOutputState>();
+
+  /** Serial output buffer — characters sent via Serial.print() */
+  serialOutput: string[] = [];
+
+  /** SPI bytes transmitted (MOSI data). */
+  spiOutput: number[] = [];
+
+  /** I2C transaction log: { addr, data, write } */
+  i2cLog: { addr: number; data: number[]; write: boolean }[] = [];
 
   /** Load a hex program and initialize the CPU + peripherals. */
   load(hexString: string, clockFreq?: number): void {
@@ -79,16 +136,45 @@ export class AVRBridge {
     const progMem = loadHexFile(hexString);
     this.cpu = new CPU(progMem);
 
-    // Attach peripherals
+    // Attach GPIO
     this.portB = new AVRIOPort(this.cpu, portBConfig);
     this.portC = new AVRIOPort(this.cpu, portCConfig);
     this.portD = new AVRIOPort(this.cpu, portDConfig);
+
+    // Timers
     this.timer0 = new AVRTimer(this.cpu, timer0Config);
     this.timer1 = new AVRTimer(this.cpu, timer1Config);
     this.timer2 = new AVRTimer(this.cpu, timer2Config);
 
+    // UART (Serial)
+    this.usart = new AVRUSART(this.cpu, usart0Config, this.clockFreq);
+    this.usart.onByteTransmit = (byte: number) => {
+      const char = String.fromCharCode(byte);
+      this.serialOutput.push(char);
+      if (this.serialOutput.length > MAX_SERIAL_BUFFER) {
+        this.serialOutput.splice(0, this.serialOutput.length - MAX_SERIAL_BUFFER);
+      }
+    };
+
+    // SPI
+    this.spi = new AVRSPI(this.cpu, spiConfig, this.clockFreq);
+    this.spi.onTransfer = (byte: number) => {
+      this.spiOutput.push(byte);
+      if (this.spiOutput.length > 256) this.spiOutput.splice(0, this.spiOutput.length - 256);
+      return 0; // MISO response (no slave connected)
+    };
+
+    // I2C (TWI)
+    this.twi = new AVRTWI(this.cpu, twiConfig, this.clockFreq);
+
+    // ADC
+    this.adc = new AVRADC(this.cpu, adcConfig);
+
     this.loaded = true;
     this.pinStates.clear();
+    this.serialOutput = [];
+    this.spiOutput = [];
+    this.i2cLog = [];
   }
 
   /** Reset the CPU (keep program loaded). */
@@ -96,6 +182,9 @@ export class AVRBridge {
     if (this.cpu) {
       this.cpu.reset();
       this.pinStates.clear();
+      this.serialOutput = [];
+      this.spiOutput = [];
+      this.i2cLog = [];
     }
   }
 
@@ -108,8 +197,23 @@ export class AVRBridge {
     this.timer0 = null;
     this.timer1 = null;
     this.timer2 = null;
+    this.usart = null;
+    this.spi = null;
+    this.twi = null;
+    this.adc = null;
     this.loaded = false;
     this.pinStates.clear();
+    this.serialOutput = [];
+    this.spiOutput = [];
+    this.i2cLog = [];
+  }
+
+  /** Feed an analog voltage into an ADC channel (0-5 for A0-A5). */
+  setAnalogInput(channel: number, voltage: number, vRef: number): void {
+    if (!this.adc || channel < 0 || channel > 5) return;
+    // ADC returns 0-1023 for 0-vRef
+    const adcValue = Math.round(Math.max(0, Math.min(1023, (voltage / vRef) * 1023)));
+    this.adc.channelValues[channel] = adcValue;
   }
 
   isLoaded(): boolean {

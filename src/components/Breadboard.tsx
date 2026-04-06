@@ -1348,9 +1348,9 @@ export default function Breadboard({
                       {pin.label} {leftSorted.length + i + 1}
                     </text>
                   ))}
-                  {/* Chip name */}
+                  {/* Chip name — short part number for the body */}
                   <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={fontSize + 1} fontWeight="600" pointerEvents="none">
-                    {def.label}
+                    {def.chipLabel ?? def.label}
                   </text>
                   {/* 555 Timer output indicator */}
                   {comp.type === 'timer' && (
@@ -1489,7 +1489,8 @@ export default function Breadboard({
       {/* Simulation readouts — rendered on top of everything */}
       {simRunning && components.map((comp) => {
         if (comp.type === 'power' || comp.type === 'multimeter' || comp.type === 'display7seg' || comp.type === 'ledmatrix'
-          || comp.type.startsWith('gate_') || comp.type === 'opamp' || comp.type === 'cd4026' || comp.type === 'atmega328') return null;
+          || comp.type.startsWith('gate_') || comp.type === 'opamp' || comp.type === 'cd4026' || comp.type === 'atmega328'
+          || comp.type === 'shift_register' || comp.type === 'flipflop_d') return null;
         const def = COMPONENT_DEFINITIONS[comp.type];
         if (!def) return null;
         const { w, h } = getRenderedSize(def, comp.rotation);

@@ -5,7 +5,12 @@ interface SidebarProps {
   onDragStart: (componentType: string) => void;
 }
 
+const DARK_COLORS = new Set(['#1a1a1a', '#2d2d2d', '#4a4a4a', '#1e293b']);
+
 function ComponentCard({ def, onDragStart }: { def: ComponentDefinition; onDragStart: () => void }) {
+  const isDark = DARK_COLORS.has(def.color);
+  const iconText = def.icon ?? def.label[0];
+
   return (
     <div
       className="component-card"
@@ -17,12 +22,13 @@ function ComponentCard({ def, onDragStart }: { def: ComponentDefinition; onDragS
     >
       <div className="component-card-icon" style={{
         backgroundColor: def.color + '22',
-        borderColor: def.color === '#1a1a1a' || def.color === '#2d2d2d' || def.color === '#4a4a4a' ? '#64748b' : def.color,
+        borderColor: isDark ? '#64748b' : def.color,
       }}>
-        <span style={{ color: def.color === '#1a1a1a' || def.color === '#2d2d2d' || def.color === '#4a4a4a' ? '#94a3b8' : def.color }}>{def.label[0]}</span>
+        <span style={{ color: isDark ? '#94a3b8' : def.color }}>{iconText}</span>
       </div>
       <div className="component-card-info">
         <span className="component-card-name">{def.label}</span>
+        {def.description && <span className="component-card-detail">{def.description}</span>}
       </div>
     </div>
   );

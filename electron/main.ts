@@ -1,4 +1,5 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
+import { getSetupStatus, downloadCli, installCore, compileSketch } from './arduinoCli';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -57,7 +58,11 @@ function ensureDir(filePath: string) {
 
 function getCircuitsDir(): string {
   const config = loadConfig();
-  return path.dirname(config.dataFilePath);
+  const dir = path.join(path.dirname(config.dataFilePath), 'circuits');
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
 }
 
 const ECX_FILTER = { name: 'E101 Circuit', extensions: ['ecx'] };
@@ -107,6 +112,62 @@ ipcMain.handle('load-circuit', async () => {
 
 ipcMain.handle('get-config', () => {
   return loadConfig();
+});
+
+// Save a named circuit to the circuits folder (used for bootstrapping demos)
+ipcMain.handle('save-demo', async (_event, name: string, data: string) => {
+  const dir = getCircuitsDir();
+  const filePath = path.join(dir, `${name}.ecx`);
+  fs.writeFileSync(filePath, data, 'utf-8');
+  return filePath;
+});
+
+// Load a named circuit from the circuits folder
+ipcMain.handle('load-named-circuit', async (_event, name: string) => {
+  const dir = getCircuitsDir();
+  const filePath = path.join(dir, `${name}.ecx`);
+  if (!fs.existsSync(filePath)) return null;
+  const data = fs.readFileSync(filePath, 'utf-8');
+  return { filePath, name, data };
+});
+
+ipcMain.handle('get-version', () => {
+  return app.getVersion();
+});
+
+ipcMain.on('set-title', (_event, title: string) => {
+  const win = BrowserWindow.getFocusedWindow();
+  if (win) win.setTitle(title);
+});
+
+// ---- Arduino CLI ---- //
+
+ipcMain.handle('arduino-status', () => {
+  return getSetupStatus();
+});
+
+ipcMain.handle('arduino-setup', async () => {
+  const status = getSetupStatus();
+  const messages: string[] = [];
+  if (!status.cliInstalled) {
+    const msg = await downloadCli();
+    messages.push(msg);
+  }
+  if (!status.coreInstalled) {
+    const msg = await installCore();
+    messages.push(msg);
+  }
+  return { success: true, messages };
+});
+
+ipcMain.handle('arduino-compile', async (_event, sketchCode: string) => {
+  try {
+    const result = await compileSketch(sketchCode);
+    return { success: true, hex: result.hex, output: result.output };
+  } catch (err: unknown) {
+    const e = err as { message?: string };
+    return { success: false, error: e.message || 'Compilation failed' };
+  }
 });
 
 // ---- Chip Definitions ---- //
@@ -174,12 +235,50 @@ function createMainWindow() {
     mainWindow.loadFile(path.join(__dirname, '../index.html'));
   }
 
-  // Open devtools with Ctrl+Shift+I (not by default)
-  mainWindow.webContents.on('before-input-event', (_event, input) => {
-    if (input.control && input.shift && input.key === 'I') {
-      mainWindow.webContents.toggleDevTools();
-    }
-  });
+  // Application menu
+  const isMac = process.platform === 'darwin';
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac ? [{ role: 'appMenu' as const }] : []),
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Save\tCtrl+S', click: () => mainWindow.webContents.send('menu-action', 'save') },
+        { label: 'Open\tCtrl+O', click: () => mainWindow.webContents.send('menu-action', 'open') },
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { label: 'Undo\tCtrl+Z', click: () => mainWindow.webContents.send('menu-action', 'undo') },
+        { label: 'Redo\tCtrl+Shift+Z', click: () => mainWindow.webContents.send('menu-action', 'redo') },
+        { type: 'separator' },
+        { label: 'Copy\tCtrl+C', click: () => mainWindow.webContents.send('menu-action', 'copy') },
+        { label: 'Paste\tCtrl+V', click: () => mainWindow.webContents.send('menu-action', 'paste') },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { label: 'Toggle Developer Tools', accelerator: 'CmdOrCtrl+Shift+I', click: () => mainWindow.webContents.toggleDevTools() },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'About E101', click: () => mainWindow.webContents.send('menu-action', 'about') },
+        { label: 'Settings', click: () => mainWindow.webContents.send('menu-action', 'settings') },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 app.whenReady().then(() => {

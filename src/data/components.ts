@@ -4,6 +4,8 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   resistor: {
     type: 'resistor',
     label: 'Resistor',
+    description: 'Limits current flow. Higher ohms = less current.',
+    icon: 'R',
     category: 'passive',
     width: 1,
     height: 2,
@@ -19,6 +21,8 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   capacitor: {
     type: 'capacitor',
     label: 'Capacitor',
+    description: 'Stores and releases electrical charge. Used for timing and filtering.',
+    icon: 'C',
     category: 'passive',
     width: 1,
     height: 1,
@@ -34,6 +38,8 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   led: {
     type: 'led',
     label: 'LED',
+    description: 'Light-emitting diode. Glows when current flows through it.',
+    icon: '💡',
     category: 'output',
     width: 1,
     height: 1,
@@ -50,6 +56,8 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   switch: {
     type: 'switch',
     label: 'Switch',
+    description: 'Click to toggle on/off. Connects or breaks a circuit.',
+    icon: '/',
     category: 'input',
     width: 1,
     height: 1,
@@ -62,7 +70,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   timer: {
     type: 'timer',
-    label: '555',
+    label: '555 Timer',
+    description: 'Generates clock pulses. Used for blinking, timing, and oscillation.',
+    icon: '~',
+    chipLabel: '555',
     category: 'active',
     width: 2,
     height: 4,
@@ -83,7 +94,9 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   power: {
     type: 'power',
-    label: 'Power',
+    label: 'Power Supply',
+    description: 'DC or AC voltage source. Powers your circuit.',
+    icon: '⚡',
     category: 'power',
     width: 2,
     height: 4,
@@ -100,7 +113,9 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   potentiometer: {
     type: 'potentiometer',
-    label: 'Pot',
+    label: 'Potentiometer',
+    description: 'Variable resistor with a dial. Adjusts voltage or signal level.',
+    icon: '🎛',
     category: 'passive',
     width: 1,
     height: 2,
@@ -117,7 +132,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   display7seg: {
     type: 'display7seg',
-    label: '7-Seg',
+    label: '7-Segment Display',
+    description: 'Shows digits 0-9. Each segment lights up individually.',
+    icon: '8.',
+    chipLabel: '7-Seg',
     category: 'active',
     width: 2,
     height: 5,
@@ -140,7 +158,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   cd4026: {
     type: 'cd4026',
-    label: '4026',
+    label: 'CD4026 Counter',
+    description: 'Counts 0-9 on clock pulses. Drives a 7-segment display directly.',
+    icon: '#',
+    chipLabel: '4026',
     category: 'active',
     width: 2,
     height: 8,
@@ -169,7 +190,9 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   multimeter: {
     type: 'multimeter',
-    label: 'Meter',
+    label: 'Multimeter',
+    description: 'Measures voltage or current between two points.',
+    icon: 'V',
     category: 'measurement',
     width: 2,
     height: 2,
@@ -186,7 +209,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   // --- Logic Gates (74HC series, DIP-14 quad gates) ---
   gate_and: {
     type: 'gate_and',
-    label: '7408',
+    label: 'AND Gate (7408)',
+    description: 'Output is HIGH only when both inputs are HIGH. 4 gates in one chip.',
+    icon: '&',
+    chipLabel: '7408',
     category: 'active',
     width: 2,
     height: 7,
@@ -213,7 +239,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   gate_or: {
     type: 'gate_or',
-    label: '7432',
+    label: 'OR Gate (7432)',
+    description: 'Output is HIGH when either input is HIGH. 4 gates in one chip.',
+    icon: '|',
+    chipLabel: '7432',
     category: 'active',
     width: 2,
     height: 7,
@@ -238,7 +267,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   gate_nand: {
     type: 'gate_nand',
-    label: '7400',
+    label: 'NAND Gate (7400)',
+    description: 'Opposite of AND. Output is LOW only when both inputs are HIGH.',
+    icon: '!&',
+    chipLabel: '7400',
     category: 'active',
     width: 2,
     height: 7,
@@ -263,7 +295,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   },
   gate_not: {
     type: 'gate_not',
-    label: '7404',
+    label: 'NOT Gate (7404)',
+    description: 'Inverts the input. HIGH becomes LOW and vice versa. 6 inverters.',
+    icon: '!',
+    chipLabel: '7404',
     category: 'active',
     width: 2,
     height: 7,
@@ -291,7 +326,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   // --- Op-Amp (LM741, DIP-8) ---
   opamp: {
     type: 'opamp',
-    label: 'LM741',
+    label: 'Op-Amp (LM741)',
+    description: 'Amplifies the difference between two inputs. Used for audio, filters, comparators.',
+    icon: '△',
+    chipLabel: 'LM741',
     category: 'active',
     width: 2,
     height: 4,
@@ -316,7 +354,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   // --- ATmega328P (Arduino Uno MCU, DIP-28) ---
   atmega328: {
     type: 'atmega328',
-    label: '328P',
+    label: 'ATmega328P',
+    description: 'Arduino Uno brain. Load a .hex program to control pins with code.',
+    icon: 'Av',
+    chipLabel: '328P',
     category: 'active',
     width: 2,
     height: 14,
@@ -361,7 +402,10 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   // --- 5x7 LED Matrix (common cathode, DIP-14) ---
   ledmatrix: {
     type: 'ledmatrix',
-    label: '5x7',
+    label: '5x7 LED Matrix',
+    description: '35 tiny LEDs in a grid. Display patterns, letters, or animations.',
+    icon: ':::',
+    chipLabel: '5x7',
     category: 'active',
     width: 2,
     height: 7,
@@ -386,6 +430,113 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
     ],
     properties: {
       color: { label: 'Color', default: 'red' },
+    },
+  },
+
+  // --- Function Generator ---
+  funcgen: {
+    type: 'funcgen',
+    label: 'Function Generator',
+    description: 'Outputs sine, square, triangle, or sawtooth waves at adjustable frequency.',
+    icon: '∿',
+    category: 'power',
+    width: 2,
+    height: 4,
+    color: '#8b5cf6',
+    pins: [
+      { id: 'out', label: 'OUT', side: 'right', offset: 0.25, type: 'output' },
+      { id: 'gnd', label: 'GND', side: 'right', offset: 0.75, type: 'ground' },
+    ],
+    properties: {
+      amplitude: { label: 'Amplitude', default: 5, unit: 'V' },
+      frequency: { label: 'Frequency', default: 1, unit: 'Hz' },
+      waveform: { label: 'Waveform', default: 'sine' },
+      offset: { label: 'DC Offset', default: 0, unit: 'V' },
+    },
+  },
+
+  // --- 74HC595 Shift Register (DIP-16) ---
+  shift_register: {
+    type: 'shift_register',
+    label: 'Shift Register (595)',
+    description: '8-bit serial-in, parallel-out. Converts 3 wires into 8 outputs.',
+    icon: '>>',
+    chipLabel: 'HC595',
+    category: 'active',
+    width: 2,
+    height: 8,
+    color: '#4a4a4a',
+    pins: [
+      { id: 'qb',    label: 'QB',    side: 'left', offset: 15/16, type: 'output' },
+      { id: 'qc',    label: 'QC',    side: 'left', offset: 13/16, type: 'output' },
+      { id: 'qd',    label: 'QD',    side: 'left', offset: 11/16, type: 'output' },
+      { id: 'qe',    label: 'QE',    side: 'left', offset: 9/16,  type: 'output' },
+      { id: 'qf',    label: 'QF',    side: 'left', offset: 7/16,  type: 'output' },
+      { id: 'qg',    label: 'QG',    side: 'left', offset: 5/16,  type: 'output' },
+      { id: 'qh',    label: 'QH',    side: 'left', offset: 3/16,  type: 'output' },
+      { id: 'gnd',   label: 'GND',   side: 'left', offset: 1/16,  type: 'ground' },
+      { id: 'qh_p',  label: "QH'",   side: 'right', offset: 15/16, type: 'output' },
+      { id: 'srclr', label: 'SRCLR', side: 'right', offset: 13/16, type: 'input' },
+      { id: 'srclk', label: 'SRCLK', side: 'right', offset: 11/16, type: 'input' },
+      { id: 'rclk',  label: 'RCLK',  side: 'right', offset: 9/16,  type: 'input' },
+      { id: 'oe',    label: 'OE',    side: 'right', offset: 7/16,  type: 'input' },
+      { id: 'ser',   label: 'SER',   side: 'right', offset: 5/16,  type: 'input' },
+      { id: 'qa',    label: 'QA',    side: 'right', offset: 3/16,  type: 'output' },
+      { id: 'vcc',   label: 'VCC',   side: 'right', offset: 1/16,  type: 'power' },
+    ],
+    properties: {},
+  },
+
+  // --- 74HC74 D Flip-Flop (DIP-14, dual) ---
+  flipflop_d: {
+    type: 'flipflop_d',
+    label: 'D Flip-Flop (7474)',
+    description: 'Stores one bit. Output follows D input on clock rising edge. Dual in one chip.',
+    icon: 'D>',
+    chipLabel: '7474',
+    category: 'active',
+    width: 2,
+    height: 7,
+    color: '#4a4a4a',
+    pins: [
+      // Left: flip-flop 1
+      { id: '1clr', label: '1CLR', side: 'left', offset: 13/14, type: 'input' },
+      { id: '1d',   label: '1D',   side: 'left', offset: 11/14, type: 'input' },
+      { id: '1clk', label: '1CLK', side: 'left', offset: 9/14,  type: 'input' },
+      { id: '1pre', label: '1PRE', side: 'left', offset: 7/14,  type: 'input' },
+      { id: '1q',   label: '1Q',   side: 'left', offset: 5/14,  type: 'output' },
+      { id: '1qn',  label: '1Q!',  side: 'left', offset: 3/14,  type: 'output' },
+      { id: 'gnd',  label: 'GND',  side: 'left', offset: 1/14,  type: 'ground' },
+      // Right: flip-flop 2
+      { id: '2clr', label: '2CLR', side: 'right', offset: 13/14, type: 'input' },
+      { id: '2d',   label: '2D',   side: 'right', offset: 11/14, type: 'input' },
+      { id: '2clk', label: '2CLK', side: 'right', offset: 9/14,  type: 'input' },
+      { id: '2pre', label: '2PRE', side: 'right', offset: 7/14,  type: 'input' },
+      { id: '2q',   label: '2Q',   side: 'right', offset: 5/14,  type: 'output' },
+      { id: '2qn',  label: '2Q!',  side: 'right', offset: 3/14,  type: 'output' },
+      { id: 'vcc',  label: 'VCC',  side: 'right', offset: 1/14,  type: 'power' },
+    ],
+    properties: {},
+  },
+
+  // --- 7805 Voltage Regulator (TO-220, 3 pins) ---
+  vreg: {
+    type: 'vreg',
+    label: 'Voltage Regulator',
+    description: 'Outputs a steady voltage regardless of input. 7805 outputs 5V.',
+    icon: '5V',
+    category: 'passive',
+    width: 1,
+    height: 2,
+    color: '#0891b2',
+    pins: [
+      { id: 'vin',  label: 'IN',  side: 'top',    offset: 0.5, type: 'input' },
+      { id: 'gnd',  label: 'GND', side: 'right',  offset: 0.5, type: 'ground' },
+      { id: 'vout', label: 'OUT', side: 'bottom', offset: 0.5, type: 'output' },
+    ],
+    properties: {
+      outputVoltage: { label: 'Output Voltage', default: 5, unit: 'V' },
+      dropout: { label: 'Dropout', default: 2, unit: 'V' },
     },
   },
 };

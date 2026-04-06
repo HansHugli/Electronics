@@ -12,6 +12,9 @@ import Breadboard from './components/Breadboard';
 import PropertiesPanel from './components/PropertiesPanel';
 import PowerConfigModal from './components/PowerConfigModal';
 import Oscilloscope, { useOscilloscope } from './components/Oscilloscope';
+import AboutDialog from './components/AboutDialog';
+import SettingsDialog from './components/SettingsDialog';
+import SketchEditor from './components/SketchEditor';
 import { generateKiCadNetlist, generateBOM } from './engine/pcbExport';
 
 let nextId = 1;
@@ -61,6 +64,10 @@ function App() {
   const [circuitName, setCircuitName] = useState('untitled');
   const [currentFilePath, setCurrentFilePath] = useState<string | undefined>(undefined);
   const [pendingPowerDrop, setPendingPowerDrop] = useState<Point | null>(null);
+  const [showAbout, setShowAbout] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showSketchEditor, setShowSketchEditor] = useState(false);
+  const sketchTargetId = useRef<string | null>(null);
   const simInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simulator = useRef(new CircuitSimulator());
@@ -68,6 +75,7 @@ function App() {
   const clipboard = useRef<PlacedComponent | null>(null);
   const dragStartPos = useRef<Point | null>(null);
   const [simSpeed, setSimSpeed] = useState(1); // multiplier: 0.25, 0.5, 1, 2, 5, 10
+  const [simAccuracy, setSimAccuracy] = useState(1); // sub-steps per tick: 1, 2, 5, 10
   const [chipsLoaded, setChipsLoaded] = useState(false);
   const [scopeVisible, setScopeVisible] = useState(false);
   const scope = useOscilloscope();
@@ -79,6 +87,20 @@ function App() {
       setChipsLoaded(true);
     });
   }, []);
+
+  // Listen for menu actions from Electron — ref set up below after handlers are defined
+  const menuActionRef = useRef<(action: string) => void>(() => {});
+  useEffect(() => {
+    if (!window.electronApi?.onMenuAction) return;
+    window.electronApi.onMenuAction((action) => menuActionRef.current(action));
+  }, []);
+
+  // Update window title when circuit name changes
+  useEffect(() => {
+    const title = `${circuitName} — E101 Electronics`;
+    document.title = title;
+    window.electronApi?.setTitle?.(title);
+  }, [circuitName]);
 
   // Simulation loop — tick interval adjusts with speed
   const tickMs = Math.round(100 / simSpeed);
@@ -101,6 +123,7 @@ function App() {
   useEffect(() => {
     if (!simRunning) return;
 
+    simulator.current.subSteps = simAccuracy;
     setComponents((prev) => {
       const states = simulator.current.tick(prev, wires, simTime, dtPerTick);
       const next = prev.map((comp) => {
@@ -389,16 +412,90 @@ function App() {
     }
   }, [loadCircuitState, showStatus]);
 
+  // Update menu action handler now that save/load are defined
+  useEffect(() => {
+    menuActionRef.current = (action: string) => {
+      switch (action) {
+        case 'about': setShowAbout(true); break;
+        case 'settings': setShowSettings(true); break;
+        case 'save': handleSave(); break;
+        case 'open': handleLoad(); break;
+        case 'undo': {
+          const snap = history.undo();
+          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentId(null); setSelectedWireId(null); }
+          break;
+        }
+        case 'redo': {
+          const snap = history.redo();
+          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentId(null); setSelectedWireId(null); }
+          break;
+        }
+        case 'copy': {
+          if (selectedComponentId) {
+            const comp = components.find((c) => c.id === selectedComponentId);
+            if (comp) clipboard.current = comp;
+          }
+          break;
+        }
+        case 'paste': {
+          if (clipboard.current) {
+            const src = clipboard.current;
+            const def = COMPONENT_DEFINITIONS[src.type];
+            if (!def) break;
+            const newPos = { x: src.position.x + GRID_W, y: src.position.y + GRID_H };
+            const newComp: PlacedComponent = {
+              id: genId(), type: src.type, position: newPos,
+              rotation: src.rotation, properties: { ...src.properties }, state: {},
+            };
+            if (!components.some((c) => componentsOverlap(newComp, c))) {
+              setComponents((prev) => {
+                const next = [...prev, newComp];
+                history.push(next, wires);
+                return next;
+              });
+              setSelectedComponentId(newComp.id);
+              clipboard.current = newComp;
+            }
+          }
+          break;
+        }
+      }
+    };
+  }, [handleSave, handleLoad, history, selectedComponentId, components, wires]);
+
   // ---- Demo ---- //
 
-  const handleLoadDemo = useCallback((demoName?: string) => {
-    if (demoName === 'counter') {
-      loadCircuitState(createCounterDemoCircuit(), '7-Seg Counter Demo');
-    } else {
-      loadCircuitState(createBlinkDemoCircuit(), 'LED Blink Demo');
+  const handleLoadDemo = useCallback(async (demoName?: string) => {
+    const name = demoName === 'counter' ? '7-Seg Counter Demo' : 'LED Blink Demo';
+    const fileName = demoName === 'counter' ? '7-Seg Counter Demo' : 'LED Blink Demo';
+
+    // Try loading from disk first (Electron only)
+    if (window.electronApi?.loadNamedCircuit) {
+      const result = await window.electronApi.loadNamedCircuit(fileName);
+      if (result) {
+        try {
+          const parsed = JSON.parse(result.data);
+          if (parsed.components && parsed.wires) {
+            loadCircuitState(parsed, result.name, result.filePath);
+            simulator.current.reset();
+            return;
+          }
+        } catch { /* fall through to generate */ }
+      }
     }
+
+    // Generate the demo and save to disk for next time
+    const circuit = demoName === 'counter' ? createCounterDemoCircuit() : createBlinkDemoCircuit();
+    loadCircuitState(circuit, name);
     simulator.current.reset();
-    setCurrentFilePath(undefined);
+
+    if (window.electronApi?.saveDemo) {
+      const data = JSON.stringify(circuit, null, 2);
+      const filePath = await window.electronApi.saveDemo(fileName, data);
+      setCurrentFilePath(filePath);
+    } else {
+      setCurrentFilePath(undefined);
+    }
   }, [loadCircuitState]);
 
   // Keyboard shortcuts
@@ -590,35 +687,14 @@ function App() {
           simRunning={simRunning}
           onToggleSimulation={handleToggleSimulation}
           onClearCircuit={handleClearCircuit}
-          onSave={handleSave}
-          onLoad={handleLoad}
           onLoadDemo={handleLoadDemo}
-          onUndo={() => {
-            const snap = history.undo();
-            if (snap) {
-              setComponents(snap.components);
-              setWires(snap.wires);
-              setSelectedComponentId(null);
-              setSelectedWireId(null);
-            }
-          }}
-          onRedo={() => {
-            const snap = history.redo();
-            if (snap) {
-              setComponents(snap.components);
-              setWires(snap.wires);
-              setSelectedComponentId(null);
-              setSelectedWireId(null);
-            }
-          }}
-          canUndo={history.canUndo()}
-          canRedo={history.canRedo()}
           simSpeed={simSpeed}
           onSimSpeedChange={setSimSpeed}
+          simAccuracy={simAccuracy}
+          onSimAccuracyChange={setSimAccuracy}
           onExportNetlist={handleExportNetlist}
           onExportBOM={handleExportBOM}
           saveStatus={saveStatus}
-          circuitName={circuitName}
         />
         <div className="canvas-container">
           <Breadboard
@@ -676,12 +752,30 @@ function App() {
         isProbed={selectedComponent ? scope.probedIds.has(selectedComponent.id) : false}
         onLoadHex={selectedComponent?.type === 'atmega328' ? () => handleLoadHex(selectedComponent.id) : undefined}
         isHexLoaded={selectedComponent?.type === 'atmega328' ? simulator.current.isAVRLoaded(selectedComponent.id) : false}
+        onWriteSketch={selectedComponent?.type === 'atmega328' ? () => {
+          sketchTargetId.current = selectedComponent.id;
+          setShowSketchEditor(true);
+        } : undefined}
       />
 
       {pendingPowerDrop && (
         <PowerConfigModal
           onConfirm={handlePowerConfigConfirm}
           onCancel={() => setPendingPowerDrop(null)}
+        />
+      )}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
+      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {showSketchEditor && (
+        <SketchEditor
+          onCompiled={(hex) => {
+            if (sketchTargetId.current) {
+              simulator.current.loadAVRProgram(sketchTargetId.current, hex);
+              showStatus('Sketch compiled and loaded');
+            }
+            setShowSketchEditor(false);
+          }}
+          onClose={() => setShowSketchEditor(false)}
         />
       )}
     </div>

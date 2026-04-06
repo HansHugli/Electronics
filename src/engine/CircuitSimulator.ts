@@ -77,6 +77,8 @@ interface PersistentState {
   opampOut: Map<string, number>;           // componentId -> previous output voltage
   ledMatrix: Map<string, boolean[]>;       // componentId -> 35 booleans (col-major: C1R1..C1R7, C2R1..C2R7, ...)
   avrBridges: Map<string, AVRBridge>;     // componentId -> AVR bridge instance
+  shiftReg: Map<string, { bits: number; output: number; prevSrclk: boolean; prevRclk: boolean }>; // 74HC595
+  flipflop: Map<string, { q1: boolean; q2: boolean; prevClk1: boolean; prevClk2: boolean }>;      // 74HC74
 }
 
 export class CircuitSimulator {
@@ -88,6 +90,8 @@ export class CircuitSimulator {
     opampOut: new Map(),
     ledMatrix: new Map(),
     avrBridges: new Map(),
+    shiftReg: new Map(),
+    flipflop: new Map(),
   };
 
   reset(): void {
@@ -97,6 +101,8 @@ export class CircuitSimulator {
     this.state.gateOutputs.clear();
     this.state.opampOut.clear();
     this.state.ledMatrix.clear();
+    this.state.shiftReg.clear();
+    this.state.flipflop.clear();
     for (const bridge of this.state.avrBridges.values()) bridge.reset();
   }
 
@@ -114,6 +120,9 @@ export class CircuitSimulator {
   isAVRLoaded(componentId: string): boolean {
     return this.state.avrBridges.get(componentId)?.isLoaded() ?? false;
   }
+
+  /** Number of sub-steps per tick for improved accuracy (1 = default, higher = more accurate). */
+  subSteps = 1;
 
   /**
    * Wire current direction info: voltage difference from→to.
@@ -136,6 +145,30 @@ export class CircuitSimulator {
    * @returns map of componentId -> state record
    */
   tick(
+    components: PlacedComponent[],
+    wires: Wire[],
+    time: number,
+    dt: number,
+  ): Map<string, Record<string, number | string>> {
+    // Sub-stepping: run multiple smaller steps for accuracy
+    if (this.subSteps > 1) {
+      const subDt = dt / this.subSteps;
+      let result: Map<string, Record<string, number | string>> = new Map();
+      for (let s = 0; s < this.subSteps; s++) {
+        const subTime = time - (dt * 1000) + ((s + 1) * subDt * 1000);
+        result = this._tickInner(components, wires, subTime, subDt);
+        // Apply intermediate results so next sub-step sees updated state
+        for (const comp of components) {
+          const newState = result.get(comp.id);
+          if (newState) Object.assign(comp.state, newState);
+        }
+      }
+      return result;
+    }
+    return this._tickInner(components, wires, time, dt);
+  }
+
+  private _tickInner(
     components: PlacedComponent[],
     wires: Wire[],
     time: number,
@@ -584,6 +617,108 @@ export class CircuitSimulator {
       }
     }
 
+    // --- Function Generator: voltage source with waveform ---
+    for (const comp of components) {
+      if (comp.type === 'funcgen') {
+        const nodeOut = getNode(comp.id, 'out');
+        const nodeGnd = getNode(comp.id, 'gnd');
+        const amp = Number(comp.properties.amplitude ?? 5);
+        const freq = Number(comp.properties.frequency ?? 1);
+        const waveform = String(comp.properties.waveform ?? 'sine');
+        const dcOffset = Number(comp.properties.offset ?? 0);
+        const t = time / 1000; // ms to seconds
+        const phase = (freq * t) % 1; // 0-1
+
+        let value = 0;
+        switch (waveform) {
+          case 'sine':
+            value = amp * Math.sin(2 * Math.PI * phase) + dcOffset;
+            break;
+          case 'square':
+            value = amp * (phase < 0.5 ? 1 : -1) + dcOffset;
+            break;
+          case 'triangle':
+            value = amp * (phase < 0.5 ? 4 * phase - 1 : 3 - 4 * phase) + dcOffset;
+            break;
+          case 'sawtooth':
+            value = amp * (2 * phase - 1) + dcOffset;
+            break;
+        }
+
+        // Stamp as conductance + current source to produce desired voltage
+        const gDrive = 1 / 0.1; // 0.1 ohm output impedance
+        stampConductance(G, nodeOut, nodeGnd, gDrive);
+        stampCurrentSource(b, nodeGnd, nodeOut, value * gDrive);
+      }
+    }
+
+    // --- Voltage Regulator (7805 style): clamp output ---
+    for (const comp of components) {
+      if (comp.type === 'vreg') {
+        const nodeIn = getNode(comp.id, 'vin');
+        const nodeOut = getNode(comp.id, 'vout');
+        const nodeGnd = getNode(comp.id, 'gnd');
+        // Model: output = min(Vin - dropout, Vout_target)
+        // For stamping, use previous tick approximation
+        const vOutTarget = Number(comp.properties.outputVoltage ?? 5);
+        // Low impedance output at target voltage (relative to GND pin)
+        const gDrive = 1 / 0.5; // 0.5 ohm output impedance
+        stampConductance(G, nodeOut, nodeGnd, gDrive);
+        stampCurrentSource(b, nodeGnd, nodeOut, vOutTarget * gDrive);
+        // Input draws current: model as moderate resistance
+        stampConductance(G, nodeIn, nodeGnd, 1 / 100);
+      }
+    }
+
+    // --- 74HC595 Shift Register: stamp outputs from previous tick ---
+    for (const comp of components) {
+      if (comp.type === 'shift_register') {
+        const nodeVcc = getNode(comp.id, 'vcc');
+        if (!this.state.shiftReg.has(comp.id)) {
+          this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false });
+        }
+        const sr = this.state.shiftReg.get(comp.id)!;
+        const outputPins = ['qa', 'qb', 'qc', 'qd', 'qe', 'qf', 'qg', 'qh'];
+        for (let i = 0; i < 8; i++) {
+          const node = getNode(comp.id, outputPins[i]);
+          const isHigh = (sr.output >> i) & 1;
+          if (isHigh) {
+            stampConductance(G, node, nodeVcc, 1 / 10);
+          } else {
+            stampConductance(G, node, 0, 1 / 10);
+          }
+        }
+        // QH' (serial out) = bit 7 of shift register
+        const qhpNode = getNode(comp.id, 'qh_p');
+        if ((sr.bits >> 7) & 1) {
+          stampConductance(G, qhpNode, nodeVcc, 1 / 10);
+        } else {
+          stampConductance(G, qhpNode, 0, 1 / 10);
+        }
+      }
+    }
+
+    // --- 74HC74 D Flip-Flop: stamp Q outputs from previous tick ---
+    for (const comp of components) {
+      if (comp.type === 'flipflop_d') {
+        const nodeVcc = getNode(comp.id, 'vcc');
+        if (!this.state.flipflop.has(comp.id)) {
+          this.state.flipflop.set(comp.id, { q1: false, q2: false, prevClk1: false, prevClk2: false });
+        }
+        const ff = this.state.flipflop.get(comp.id)!;
+        // FF1 outputs
+        const node1q = getNode(comp.id, '1q');
+        const node1qn = getNode(comp.id, '1qn');
+        stampConductance(G, node1q, ff.q1 ? nodeVcc : 0, 1 / 10);
+        stampConductance(G, node1qn, ff.q1 ? 0 : nodeVcc, 1 / 10);
+        // FF2 outputs
+        const node2q = getNode(comp.id, '2q');
+        const node2qn = getNode(comp.id, '2qn');
+        stampConductance(G, node2q, ff.q2 ? nodeVcc : 0, 1 / 10);
+        stampConductance(G, node2qn, ff.q2 ? 0 : nodeVcc, 1 / 10);
+      }
+    }
+
     // --- ATmega328: run AVR CPU and stamp output pins ---
     const avrGpioPins = [
       'pd0','pd1','pd2','pd3','pd4','pd5','pd6','pd7',
@@ -924,6 +1059,98 @@ export class CircuitSimulator {
       }
     }
 
+    // Function generator: store output voltage
+    for (const comp of components) {
+      if (comp.type === 'funcgen') {
+        const vOut = nodeVoltage(getNode(comp.id, 'out'));
+        const state = results.get(comp.id) ?? {};
+        state.voltage = vOut;
+        results.set(comp.id, state);
+      }
+    }
+
+    // Voltage regulator: clamp output and report
+    for (const comp of components) {
+      if (comp.type === 'vreg') {
+        const vIn = nodeVoltage(getNode(comp.id, 'vin'));
+        const vOut = nodeVoltage(getNode(comp.id, 'vout'));
+        const state = results.get(comp.id) ?? {};
+        state.voltage = vOut;
+        state.inputVoltage = vIn;
+        results.set(comp.id, state);
+      }
+    }
+
+    // 74HC595 Shift Register: update shift/latch on clock edges
+    for (const comp of components) {
+      if (comp.type === 'shift_register') {
+        const sr = this.state.shiftReg.get(comp.id)!;
+        const vVcc = nodeVoltage(getNode(comp.id, 'vcc'));
+        const threshold = vVcc * 0.5;
+        const srclk = nodeVoltage(getNode(comp.id, 'srclk')) > threshold;
+        const rclk = nodeVoltage(getNode(comp.id, 'rclk')) > threshold;
+        const ser = nodeVoltage(getNode(comp.id, 'ser')) > threshold;
+        const srclr = nodeVoltage(getNode(comp.id, 'srclr')) > threshold; // active low
+        const oe = nodeVoltage(getNode(comp.id, 'oe')) > threshold; // active low
+
+        // SRCLR is active low — if LOW, clear shift register
+        if (!srclr) {
+          sr.bits = 0;
+        }
+        // Rising edge of SRCLK: shift in SER bit
+        else if (srclk && !sr.prevSrclk) {
+          sr.bits = ((sr.bits << 1) | (ser ? 1 : 0)) & 0xFF;
+        }
+        // Rising edge of RCLK: latch shift register to output
+        if (rclk && !sr.prevRclk) {
+          sr.output = oe ? 0 : sr.bits; // OE active low — if HIGH, outputs disabled
+        }
+        sr.prevSrclk = srclk;
+        sr.prevRclk = rclk;
+
+        const state = results.get(comp.id) ?? {};
+        state.shiftBits = sr.bits;
+        state.outputBits = sr.output;
+        results.set(comp.id, state);
+      }
+    }
+
+    // 74HC74 D Flip-Flop: update on clock edges
+    for (const comp of components) {
+      if (comp.type === 'flipflop_d') {
+        const ff = this.state.flipflop.get(comp.id)!;
+        const vVcc = nodeVoltage(getNode(comp.id, 'vcc'));
+        const threshold = vVcc * 0.5;
+
+        for (const n of ['1', '2'] as const) {
+          const clk = nodeVoltage(getNode(comp.id, `${n}clk`)) > threshold;
+          const d = nodeVoltage(getNode(comp.id, `${n}d`)) > threshold;
+          const pre = nodeVoltage(getNode(comp.id, `${n}pre`)) > threshold; // active low
+          const clr = nodeVoltage(getNode(comp.id, `${n}clr`)) > threshold; // active low
+          const prevClk = n === '1' ? ff.prevClk1 : ff.prevClk2;
+
+          let q = n === '1' ? ff.q1 : ff.q2;
+          // PRE and CLR are active low
+          if (!clr) {
+            q = false;
+          } else if (!pre) {
+            q = true;
+          } else if (clk && !prevClk) {
+            // Rising edge: capture D
+            q = d;
+          }
+
+          if (n === '1') { ff.q1 = q; ff.prevClk1 = clk; }
+          else { ff.q2 = q; ff.prevClk2 = clk; }
+        }
+
+        const state = results.get(comp.id) ?? {};
+        state['1q'] = ff.q1 ? 1 : 0;
+        state['2q'] = ff.q2 ? 1 : 0;
+        results.set(comp.id, state);
+      }
+    }
+
     // ATmega328: feed solved voltages back into AVR input pins and expose state
     for (const comp of components) {
       if (comp.type === 'atmega328') {
@@ -934,7 +1161,7 @@ export class CircuitSimulator {
         const state = results.get(comp.id) ?? {};
         state.programLoaded = 1;
 
-        // Feed external voltages into input pins
+        // Feed external voltages into digital input pins
         for (const pinId of avrGpioPins) {
           const pinState = bridge.pinStates.get(pinId);
           if (pinState === 'input' || pinState === 'input_pullup') {
@@ -945,6 +1172,18 @@ export class CircuitSimulator {
           const ps = bridge.pinStates.get(pinId);
           state[`pin_${pinId}`] = ps === 'high' ? 1 : ps === 'low' ? 0 : ps === 'input_pullup' ? 'pullup' : 'z';
         }
+
+        // Feed analog voltages into ADC channels (A0-A5 = pc0-pc5)
+        const vRef = nodeVoltage(getNode(comp.id, 'avcc'));
+        for (let ch = 0; ch < 6; ch++) {
+          const pinId = `pc${ch}`;
+          const v = nodeVoltage(getNode(comp.id, pinId));
+          bridge.setAnalogInput(ch, v, vRef > 0.1 ? vRef : vcc);
+        }
+
+        // Expose serial output
+        state.serialOutput = bridge.serialOutput.join('');
+        state.serialLength = bridge.serialOutput.length;
 
         results.set(comp.id, state);
       }

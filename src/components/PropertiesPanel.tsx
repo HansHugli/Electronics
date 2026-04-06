@@ -23,9 +23,10 @@ interface PropertiesPanelProps {
   isProbed?: boolean;
   onLoadHex?: () => void;
   isHexLoaded?: boolean;
+  onWriteSketch?: () => void;
 }
 
-export default function PropertiesPanel({ component, onPropertyChange, onRotate, selectedWire, onWireColorChange, onProbe, isProbed, onLoadHex, isHexLoaded }: PropertiesPanelProps) {
+export default function PropertiesPanel({ component, onPropertyChange, onRotate, selectedWire, onWireColorChange, onProbe, isProbed, onLoadHex, isHexLoaded, onWriteSketch }: PropertiesPanelProps) {
   // Wire selected — show wire properties
   if (selectedWire) {
     return (
@@ -175,18 +176,24 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
           }
 
           if (key === 'waveform') {
+            const waveformOptions = component.type === 'funcgen'
+              ? ['sine', 'square', 'triangle', 'sawtooth']
+              : ['square', 'sine'];
+            const waveformLabels: Record<string, string> = {
+              sine: '∿ Sine', square: '▯ Square', triangle: '△ Triangle', sawtooth: '/ Saw',
+            };
             return (
               <div key={key} className="property-row-col">
                 <label>{prop.label}</label>
                 <div className="prop-toggle-group">
-                  {['square', 'sine'].map((opt) => (
+                  {waveformOptions.map((opt) => (
                     <button
                       key={opt}
                       type="button"
                       className={`prop-toggle-btn ${value === opt ? 'active' : ''}`}
                       onClick={() => onPropertyChange(component.id, key, opt)}
                     >
-                      {opt === 'square' ? '▯ Square' : '∿ Sine'}
+                      {waveformLabels[opt] ?? opt}
                     </button>
                   ))}
                 </div>
@@ -217,13 +224,24 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
           <span className="property-value">({component.position.x}, {component.position.y})</span>
         </div>
         {onLoadHex && (
-          <button
-            type="button"
-            className={`prop-probe-btn ${isHexLoaded ? 'active' : ''}`}
-            onClick={onLoadHex}
-          >
-            {isHexLoaded ? 'Hex Loaded' : 'Load .hex'}
-          </button>
+          <div className="prop-btn-row">
+            <button
+              type="button"
+              className={`prop-probe-btn ${isHexLoaded ? 'active' : ''}`}
+              onClick={onLoadHex}
+            >
+              {isHexLoaded ? 'Hex Loaded' : 'Load .hex'}
+            </button>
+            {onWriteSketch && (
+              <button
+                type="button"
+                className="prop-probe-btn"
+                onClick={onWriteSketch}
+              >
+                Write Sketch
+              </button>
+            )}
+          </div>
         )}
         {onProbe && (
           <button

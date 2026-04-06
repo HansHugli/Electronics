@@ -37,12 +37,14 @@
     "concurrently": "^8.2.0",
     "electron": "^41.1.1",
     "electron-builder": "^24.7.0",
+    "sharp": "^0.34.5",
     "typescript": "^5.6.2",
     "vite": "^5.4.1",
     "wait-on": "^9.0.4"
   },
   "build": {
-    "appId": "com.example.e101",
+    "appId": "com.e101.electronics",
+    "productName": "E101 Electronics",
     "files": [
       "dist/**",
       "dist/electron/**",
@@ -51,6 +53,14 @@
     ],
     "directories": {
       "buildResources": "build"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": "nsis"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "target": "dmg"
     }
   }
 }

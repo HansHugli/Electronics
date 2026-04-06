@@ -14,6 +14,9 @@ export interface Pin {
 export interface ComponentDefinition {
   type: string;
   label: string;
+  description?: string;  // short blurb for sidebar
+  icon?: string;         // 1-3 char icon for sidebar card
+  chipLabel?: string;    // short label for chip body on breadboard (e.g. "555", "7408")
   category: 'passive' | 'active' | 'power' | 'output' | 'input' | 'measurement';
   width: number;  // grid units
   height: number; // grid units
