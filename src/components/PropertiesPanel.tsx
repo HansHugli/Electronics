@@ -19,9 +19,13 @@ interface PropertiesPanelProps {
   onRotate: (componentId: string) => void;
   selectedWire: Wire | null;
   onWireColorChange: (wireId: string, color: string) => void;
+  onProbe?: () => void;
+  isProbed?: boolean;
+  onLoadHex?: () => void;
+  isHexLoaded?: boolean;
 }
 
-export default function PropertiesPanel({ component, onPropertyChange, onRotate, selectedWire, onWireColorChange }: PropertiesPanelProps) {
+export default function PropertiesPanel({ component, onPropertyChange, onRotate, selectedWire, onWireColorChange, onProbe, isProbed, onLoadHex, isHexLoaded }: PropertiesPanelProps) {
   // Wire selected — show wire properties
   if (selectedWire) {
     return (
@@ -111,6 +115,45 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
             );
           }
 
+          // Potentiometer position slider
+          if (key === 'position' && component.type === 'potentiometer') {
+            return (
+              <div key={key} className="property-row-col">
+                <label>{prop.label}: {value}%</label>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={Number(value)}
+                  title={`${value}%`}
+                  onChange={(e) => onPropertyChange(component.id, key, parseInt(e.target.value, 10))}
+                  className="prop-slider"
+                />
+              </div>
+            );
+          }
+
+          // Multimeter mode toggle
+          if (key === 'mode' && component.type === 'multimeter') {
+            return (
+              <div key={key} className="property-row-col">
+                <label>{prop.label}</label>
+                <div className="prop-toggle-group">
+                  {['voltage', 'current'].map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      className={`prop-toggle-btn ${value === opt ? 'active' : ''}`}
+                      onClick={() => onPropertyChange(component.id, key, opt)}
+                    >
+                      {opt === 'voltage' ? 'V' : 'A'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          }
+
           if (key === 'mode') {
             return (
               <div key={key} className="property-row-col">
@@ -173,6 +216,24 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
           <label>Position</label>
           <span className="property-value">({component.position.x}, {component.position.y})</span>
         </div>
+        {onLoadHex && (
+          <button
+            type="button"
+            className={`prop-probe-btn ${isHexLoaded ? 'active' : ''}`}
+            onClick={onLoadHex}
+          >
+            {isHexLoaded ? 'Hex Loaded' : 'Load .hex'}
+          </button>
+        )}
+        {onProbe && (
+          <button
+            type="button"
+            className={`prop-probe-btn ${isProbed ? 'active' : ''}`}
+            onClick={onProbe}
+          >
+            {isProbed ? 'Probed' : 'Probe'}
+          </button>
+        )}
       </div>
     );
   }

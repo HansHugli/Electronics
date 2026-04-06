@@ -15,5 +15,8 @@
   "bumpFiles": [
     "package.json",
     "package-lock.json"
-  ]
+  ],
+  "scripts": {
+    "postbump": "git add README.md FEATURES.md"
+  }
 }

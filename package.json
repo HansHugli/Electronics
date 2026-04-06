@@ -23,7 +23,9 @@
     "ship": "npm run release && npm run build && git push --follow-tags origin main"
   },
   "dependencies": {
+    "avr8js": "^0.21.0",
     "electron": "^28.0.0",
+    "intel-hex": "^0.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

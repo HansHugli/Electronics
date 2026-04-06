@@ -9,7 +9,8 @@ import {
   NUM_BOARDS, SINGLE_BOARD_COLS,
   boardColumns, boardColOffset,
   REL_COL_GAP,
-  gridToPixel, isGapColumn,
+  gridToPixel, pixelToGrid, isGapColumn, isValidPinHole,
+  buildPinGroups, buildPinLookup,
 } from '../data/breadboard';
 
 
@@ -19,6 +20,7 @@ interface BreadboardProps {
   simRunning: boolean;
   onDropComponent: (type: string, position: Point) => void;
   onMoveComponent: (id: string, position: Point) => void;
+  onMoveEnd: () => void;
   onStartWire: (componentId: string, pinId: string) => void;
   onEndWire: (componentId: string, pinId: string) => void;
   wiringFrom: { componentId: string; pinId: string } | null;
@@ -27,6 +29,8 @@ interface BreadboardProps {
   onSelectWire: (id: string | null) => void;
   selectedWireId: string | null;
   onToggleSwitch: (id: string) => void;
+  wireCurrents: Map<string, number>;
+  pinHoleVoltages: Map<string, number>;
 }
 
 /**
@@ -82,6 +86,43 @@ function snapComponentToGrid(x: number, y: number, compType: string, rotation: n
 
   // Component position = hole position minus pin offset
   return { x: holeX - pinOffX, y: holeY - pinOffY };
+}
+
+/**
+ * Check if a component at the given position has all its pins on valid breadboard holes.
+ * Power components are exempt (they live in the supply area).
+ */
+function isValidPlacement(compType: string, position: Point, rotation: number): boolean {
+  const def = COMPONENT_DEFINITIONS[compType];
+  if (!def) return true;
+  // Power components live off-board in the supply area
+  if (compType === 'power') return true;
+
+  for (const pin of def.pins) {
+    const { w, h } = getRenderedSizeRaw(def, rotation);
+    const side = rotatedSide(pin.side, rotation);
+    let px = 0, py = 0;
+    switch (side) {
+      case 'left':   px = 0;  py = h * pin.offset; break;
+      case 'right':  px = w;  py = h * pin.offset; break;
+      case 'top':    px = w * pin.offset; py = 0;  break;
+      case 'bottom': px = w * pin.offset; py = h;  break;
+    }
+    const absPx = position.x + px;
+    const absPy = position.y + py;
+    const grid = pixelToGrid(absPx, absPy);
+    if (!isValidPinHole(grid.col, grid.row)) return false;
+  }
+  return true;
+}
+
+/** Raw rendered size helper (used before getRenderedSize is defined to avoid hoisting). */
+function getRenderedSizeRaw(def: { width: number; height: number }, rotation: number): { w: number; h: number } {
+  const isRotated = rotation === 90 || rotation === 270;
+  return {
+    w: (isRotated ? def.height : def.width) * GRID_W,
+    h: (isRotated ? def.width : def.height) * GRID_H,
+  };
 }
 
 /**
@@ -373,6 +414,7 @@ export default function Breadboard({
   simRunning,
   onDropComponent,
   onMoveComponent,
+  onMoveEnd,
   onStartWire,
   onEndWire,
   wiringFrom,
@@ -381,10 +423,13 @@ export default function Breadboard({
   onSelectWire,
   selectedWireId,
   onToggleSwitch,
+  wireCurrents,
+  pinHoleVoltages,
 }: BreadboardProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<{ id: string; offsetX: number; offsetY: number; type: string; rotation: number } | null>(null);
   const [mousePos, setMousePos] = useState<Point | null>(null);
+  const [hoveredHole, setHoveredHole] = useState<string | null>(null); // "col,row"
 
   // Zoom and pan state
   const [zoom, setZoom] = useState(1);
@@ -392,6 +437,17 @@ export default function Breadboard({
   const isPanning = useRef(false);
   const panStart = useRef<Point>({ x: 0, y: 0 });
   const panOffsetStart = useRef<Point>({ x: 0, y: 0 });
+
+  // Pin group data for hover highlighting
+  const pinGroups = useMemo(() => buildPinGroups(), []);
+  const pinLookup = useMemo(() => buildPinLookup(pinGroups), [pinGroups]);
+  const pinGroupMap = useMemo(() => {
+    const m = new Map<string, { col: number; row: number }[]>();
+    for (const g of pinGroups) {
+      m.set(g.id, g.pins);
+    }
+    return m;
+  }, [pinGroups]);
 
   const viewBox = useMemo(() => {
     const vw = TOTAL_PIXEL_WIDTH / zoom;
@@ -416,7 +472,7 @@ export default function Breadboard({
   // Pre-compute routed wire paths; each wire avoids overlapping prior wires
   const routedWires = useMemo(() => {
     const allSegments: { ax: number; ay: number; bx: number; by: number }[] = [];
-    const results: { wire: Wire; path: string }[] = [];
+    const results: { wire: Wire; path: string; points: Point[] }[] = [];
 
     for (const wire of wires) {
       const fromPos = getEndpointPos(wire.from);
@@ -433,7 +489,7 @@ export default function Breadboard({
         allSegments.push({ ax: clean[i].x, ay: clean[i].y, bx: clean[i + 1].x, by: clean[i + 1].y });
       }
 
-      results.push({ wire, path: pointsToPathD(points) });
+      results.push({ wire, path: pointsToPathD(points), points: cleanPoints(points) });
     }
 
     return results;
@@ -476,6 +532,7 @@ export default function Breadboard({
       const svgX = panOffset.x + (e.clientX - rect.left) / rect.width * vw;
       const svgY = panOffset.y + (e.clientY - rect.top) / rect.height * vh;
       const pos = snapComponentToGrid(svgX, svgY, type, 0);
+      if (!isValidPlacement(type, pos, 0)) return;
       onDropComponent(type, pos);
     },
     [onDropComponent, zoom, panOffset]
@@ -530,6 +587,7 @@ export default function Breadboard({
           dragRef.current.type,
           dragRef.current.rotation,
         );
+        if (!isValidPlacement(dragRef.current.type, pos, dragRef.current.rotation)) return;
         onMoveComponent(dragRef.current.id, pos);
       }
     },
@@ -537,9 +595,12 @@ export default function Breadboard({
   );
 
   const handleMouseUp = useCallback(() => {
+    if (dragRef.current) {
+      onMoveEnd();
+    }
     dragRef.current = null;
     isPanning.current = false;
-  }, []);
+  }, [onMoveEnd]);
 
   const handlePinMouseDown = useCallback(
     (componentId: string, pinId: string) => {
@@ -631,6 +692,28 @@ export default function Breadboard({
     [wiringFrom, onStartWire, onEndWire]
   );
 
+  // Compute highlighted holes for the hovered strip
+  const highlightedHoles = useMemo(() => {
+    if (!hoveredHole) return null;
+    const groupId = pinLookup.get(hoveredHole);
+    if (!groupId) return null;
+    const pins = pinGroupMap.get(groupId);
+    if (!pins) return null;
+    return pins.map(({ col, row }) => {
+      const { x, y } = gridToPixel(col, row);
+      return (
+        <circle
+          key={`hl-${col}-${row}`}
+          cx={x} cy={y} r={3.5}
+          fill="#fbbf2455"
+          stroke="#fbbf24"
+          strokeWidth={1}
+          pointerEvents="none"
+        />
+      );
+    });
+  }, [hoveredHole, pinLookup, pinGroupMap]);
+
   // Build pin hole elements for all breadboards
   const pinHoles = useMemo(() => {
     const holes: JSX.Element[] = [];
@@ -638,7 +721,6 @@ export default function Breadboard({
       if (isGapColumn(col)) continue;
       for (let row = 0; row < TOTAL_ROWS; row++) {
         const { x, y } = gridToPixel(col, row);
-        // Determine if this is a rail column on any board
         let isPositiveRail = false;
         let isNegativeRail = false;
         for (let bi = 0; bi < NUM_BOARDS; bi++) {
@@ -646,25 +728,49 @@ export default function Breadboard({
           if (col === bc.leftRailStart || col === bc.rightRailStart) isPositiveRail = true;
           if (col === bc.leftRailStart + 1 || col === bc.rightRailStart + 1) isNegativeRail = true;
         }
-        const isRail = isPositiveRail || isNegativeRail;
-        const color = isPositiveRail ? '#ef444466' : isNegativeRail ? '#3b82f666' : '#1a1a1a';
+
+        // Voltage-based highlighting during simulation
+        const holeVoltage = simRunning && pinHoleVoltages ? (pinHoleVoltages.get(`${col},${row}`) ?? 0) : 0;
+        const hasVoltage = Math.abs(holeVoltage) > 0.01;
+
+        let color: string;
+        let strokeColor: string;
+        let r = 2.5;
+        if (hasVoltage) {
+          color = holeVoltage > 0 ? '#4ade80' : '#60a5fa';
+          strokeColor = holeVoltage > 0 ? '#22c55e' : '#3b82f6';
+          r = 3;
+        } else if (isPositiveRail) {
+          color = '#ef444466';
+          strokeColor = '#ef444455';
+        } else if (isNegativeRail) {
+          color = '#3b82f666';
+          strokeColor = '#3b82f655';
+        } else {
+          color = '#1a1a1a';
+          strokeColor = '#00000022';
+        }
+
+        const holeKey = `${col},${row}`;
         holes.push(
           <circle
             key={`hole-${col}-${row}`}
             cx={x}
             cy={y}
-            r={2.5}
+            r={r}
             fill={color}
-            stroke={isRail ? (isPositiveRail ? '#ef444455' : '#3b82f655') : '#00000022'}
-            strokeWidth={0.5}
+            stroke={strokeColor}
+            strokeWidth={hasVoltage ? 1 : 0.5}
             className="pin-hole"
             onMouseDown={(e) => handleBoardPinMouseDown(col, row, e)}
+            onMouseEnter={() => setHoveredHole(holeKey)}
+            onMouseLeave={() => setHoveredHole((prev) => prev === holeKey ? null : prev)}
           />
         );
       }
     }
     return holes;
-  }, [handleBoardPinMouseDown]);
+  }, [handleBoardPinMouseDown, simRunning, pinHoleVoltages]);
 
   // Draw connection traces for all boards
   const groupTraces = useMemo(() => {
@@ -788,33 +894,73 @@ export default function Breadboard({
       {/* Pin holes */}
       {pinHoles}
 
+      {/* Hover strip highlight */}
+      {highlightedHoles}
+
       {/* Rail labels */}
       {railLabels}
 
       {/* Wires — routed orthogonally */}
-      {routedWires.map(({ wire, path }) => (
-        <g key={wire.id}>
-          {/* Invisible fat hitbox for easier clicking */}
-          <path
-            d={path}
-            stroke="transparent"
-            strokeWidth={12}
-            fill="none"
-            onMouseDown={(e) => handleWireClick(e, wire.id)}
-            className="wire-hitbox"
-          />
-          <path
-            d={path}
-            stroke={selectedWireId === wire.id ? '#38bdf8' : wire.color}
-            strokeWidth={selectedWireId === wire.id ? 3.5 : 2.5}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            fill="none"
-            className="wire"
-            pointerEvents="none"
-          />
-        </g>
-      ))}
+      {routedWires.map(({ wire, path, points }) => {
+        const vDiff = wireCurrents?.get(wire.id) ?? 0;
+        const hasFlow = simRunning && Math.abs(vDiff) > 0.01;
+        // Current flows from high to low voltage.
+        // vDiff = V_from - V_to. If positive, current flows from→to (forward along wire).
+        const flowReverse = vDiff < 0;
+
+        return (
+          <g key={wire.id}>
+            {/* Invisible fat hitbox for easier clicking */}
+            <path
+              d={path}
+              stroke="transparent"
+              strokeWidth={12}
+              fill="none"
+              onMouseDown={(e) => handleWireClick(e, wire.id)}
+              className="wire-hitbox"
+            />
+            <path
+              d={path}
+              stroke={selectedWireId === wire.id ? '#38bdf8' : wire.color}
+              strokeWidth={selectedWireId === wire.id ? 3.5 : 2.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              fill="none"
+              className="wire"
+              pointerEvents="none"
+            />
+            {/* Current direction arrows */}
+            {hasFlow && points.length >= 2 && (() => {
+              // Place arrows at midpoints of each segment
+              const arrows: JSX.Element[] = [];
+              const cleanPts = flowReverse ? [...points].reverse() : points;
+              for (let i = 0; i < cleanPts.length - 1; i++) {
+                const a = cleanPts[i];
+                const b = cleanPts[i + 1];
+                const mx = (a.x + b.x) / 2;
+                const my = (a.y + b.y) / 2;
+                const dx = b.x - a.x;
+                const dy = b.y - a.y;
+                const len = Math.sqrt(dx * dx + dy * dy);
+                if (len < 10) continue; // skip very short segments
+                // Angle in degrees
+                const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+                arrows.push(
+                  <polygon
+                    key={`arr-${wire.id}-${i}`}
+                    points="-3,-2 3,0 -3,2"
+                    transform={`translate(${mx},${my}) rotate(${angle})`}
+                    fill="#ffffff"
+                    opacity={0.7}
+                    pointerEvents="none"
+                  />
+                );
+              }
+              return arrows;
+            })()}
+          </g>
+        );
+      })}
 
       {/* Wire preview while drawing */}
       {previewPath && (
@@ -981,11 +1127,160 @@ export default function Breadboard({
                   strokeWidth={1.5}
                 />
               </>
-            ) : (
+            ) : comp.type === 'potentiometer' ? (() => {
+              // Potentiometer: circular body with wiper arrow
+              const cx = w / 2;
+              const cy = h / 2;
+              const r = Math.min(w, h) * 0.35;
+              const pos = Number(comp.properties.position ?? 50) / 100;
+              const wiperAngle = -90 + pos * 270; // sweep from top-left to top-right
+              const rad = wiperAngle * Math.PI / 180;
+              return (
+                <>
+                  {/* Leads */}
+                  <line x1={cx} y1={0} x2={cx} y2={cy - r} stroke="#94a3b8" strokeWidth={1.5} />
+                  <line x1={cx} y1={cy + r} x2={cx} y2={h} stroke="#94a3b8" strokeWidth={1.5} />
+                  <line x1={w} y1={cy} x2={cx + r} y2={cy} stroke="#94a3b8" strokeWidth={1.5} />
+                  {/* Body */}
+                  <circle cx={cx} cy={cy} r={r} fill={def.color} stroke="#0284c7" strokeWidth={1} />
+                  {/* Wiper indicator */}
+                  <line
+                    x1={cx} y1={cy}
+                    x2={cx + Math.cos(rad) * r * 0.8} y2={cy + Math.sin(rad) * r * 0.8}
+                    stroke="#e2e8f0" strokeWidth={1.5} strokeLinecap="round"
+                  />
+                  <circle cx={cx} cy={cy} r={1.5} fill="#e2e8f0" />
+                </>
+              );
+            })() : comp.type === 'display7seg' ? (() => {
+              // 7-segment DIP display
+              const onColor = '#ef4444';
+              const offColor = '#2a1a1a';
+              const segA = comp.state?.seg_a ? onColor : offColor;
+              const segB = comp.state?.seg_b ? onColor : offColor;
+              const segC = comp.state?.seg_c ? onColor : offColor;
+              const segD = comp.state?.seg_d ? onColor : offColor;
+              const segE = comp.state?.seg_e ? onColor : offColor;
+              const segF = comp.state?.seg_f ? onColor : offColor;
+              const segG = comp.state?.seg_g ? onColor : offColor;
+              // Display window in the upper 60% of the chip
+              const dh = h * 0.55;
+              const pad = 4;
+              const sw = w - pad * 2; // segment area width
+              const sh = (dh - pad * 2) * 0.48; // half height
+              const t = 1.5;
+              const ox = pad;
+              const oy = pad + 2;
+              return (
+                <>
+                  <rect width={w} height={h} fill="#1a1a1a" stroke="#333" strokeWidth={1} rx={2} />
+                  {/* Display window */}
+                  <rect x={2} y={2} width={w - 4} height={dh} fill="#0a0a0a" rx={1} />
+                  {/* a: top horizontal */}
+                  <rect x={ox} y={oy} width={sw} height={t} fill={segA} rx={0.5} />
+                  {/* b: top-right vertical */}
+                  <rect x={ox + sw - t} y={oy} width={t} height={sh} fill={segB} rx={0.5} />
+                  {/* c: bottom-right vertical */}
+                  <rect x={ox + sw - t} y={oy + sh} width={t} height={sh} fill={segC} rx={0.5} />
+                  {/* d: bottom horizontal */}
+                  <rect x={ox} y={oy + sh * 2 - t} width={sw} height={t} fill={segD} rx={0.5} />
+                  {/* e: bottom-left vertical */}
+                  <rect x={ox} y={oy + sh} width={t} height={sh} fill={segE} rx={0.5} />
+                  {/* f: top-left vertical */}
+                  <rect x={ox} y={oy} width={t} height={sh} fill={segF} rx={0.5} />
+                  {/* g: middle horizontal */}
+                  <rect x={ox} y={oy + sh - t / 2} width={sw} height={t} fill={segG} rx={0.5} />
+                  {/* Pin 1 notch */}
+                  <circle cx={w / 2} cy={h} r={2} fill="#0a0a0a" stroke="#444" strokeWidth={0.5} />
+                  {/* Pin labels */}
+                  <text x={4} y={h * 0.9 + 1} fill="#999" fontSize={3} pointerEvents="none">1 e</text>
+                  <text x={4} y={h * 0.7 + 1} fill="#999" fontSize={3} pointerEvents="none">2 d</text>
+                  <text x={4} y={h * 0.5 + 1} fill="#999" fontSize={3} pointerEvents="none">3 ⏚</text>
+                  <text x={4} y={h * 0.3 + 1} fill="#999" fontSize={3} pointerEvents="none">4 c</text>
+                  <text x={4} y={h * 0.1 + 1} fill="#999" fontSize={3} pointerEvents="none">5 dp</text>
+                  <text x={w - 4} y={h * 0.9 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">b 6</text>
+                  <text x={w - 4} y={h * 0.7 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">a 7</text>
+                  <text x={w - 4} y={h * 0.5 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">V+ 8</text>
+                  <text x={w - 4} y={h * 0.3 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">f 9</text>
+                  <text x={w - 4} y={h * 0.1 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">g 10</text>
+                </>
+              );
+            })() : comp.type === 'ledmatrix' ? (() => {
+              // 5x7 LED Matrix
+              const matrixColorMap: Record<string, string> = {
+                red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308',
+                white: '#f1f5f9', orange: '#f97316',
+              };
+              const matOnColor = matrixColorMap[comp.properties.color as string] || '#ef4444';
+              const matOffColor = '#1a0a0a';
+              const padX = 6;
+              const padY = 4;
+              const displayW = w - padX * 2;
+              const displayH = h * 0.65;
+              const dotW = displayW / 5;
+              const dotH = displayH / 7;
+              const dotR = Math.min(dotW, dotH) * 0.3;
+              return (
+                <>
+                  <rect width={w} height={h} fill="#1a1a1a" stroke="#333" strokeWidth={1} rx={2} />
+                  {/* Display window */}
+                  <rect x={padX - 2} y={padY - 2} width={displayW + 4} height={displayH + 4} fill="#0a0a0a" rx={1} />
+                  {/* LED dots (5 cols x 7 rows) */}
+                  {Array.from({ length: 5 }).map((_, c) =>
+                    Array.from({ length: 7 }).map((_, r) => {
+                      const isOn = comp.state?.[`led_${c}_${r}`];
+                      return (
+                        <circle
+                          key={`dot-${c}-${r}`}
+                          cx={padX + dotW * c + dotW / 2}
+                          cy={padY + dotH * r + dotH / 2}
+                          r={dotR}
+                          fill={isOn ? matOnColor : matOffColor}
+                          opacity={isOn ? 1 : 0.3}
+                        />
+                      );
+                    })
+                  )}
+                  {/* Pin 1 notch */}
+                  <circle cx={w / 2} cy={h} r={2} fill="#0a0a0a" stroke="#444" strokeWidth={0.5} />
+                </>
+              );
+            })() : comp.type === 'multimeter' ? (() => {
+              // Multimeter: display panel showing reading
+              const displayVal = comp.state?.displayValue;
+              const displayUnit = comp.state?.displayUnit ?? 'V';
+              const mode = comp.properties.mode ?? 'voltage';
+              let readout = '---';
+              if (displayVal !== undefined && simRunning) {
+                const v = Number(displayVal);
+                if (Math.abs(v) < 0.001) readout = '0.000';
+                else if (Math.abs(v) < 1) readout = (v * 1000).toFixed(1) + 'm';
+                else readout = v.toFixed(3);
+              }
+              return (
+                <>
+                  <rect width={w} height={h} fill="#1e293b" stroke="#475569" strokeWidth={1} rx={3} />
+                  {/* Screen */}
+                  <rect x={3} y={3} width={w - 6} height={h * 0.5} fill="#0f172a" rx={2} />
+                  {/* Reading */}
+                  <text x={w / 2} y={h * 0.32} textAnchor="middle" fill="#4ade80" fontSize={7} fontFamily="monospace" fontWeight="700" pointerEvents="none">
+                    {readout}
+                  </text>
+                  {/* Unit */}
+                  <text x={w - 5} y={h * 0.32} textAnchor="end" fill="#94a3b8" fontSize={4} pointerEvents="none">
+                    {displayUnit}
+                  </text>
+                  {/* Mode label */}
+                  <text x={w / 2} y={h * 0.72} textAnchor="middle" fill="#94a3b8" fontSize={4} pointerEvents="none">
+                    {mode === 'current' ? 'AMPS' : 'VOLTS'}
+                  </text>
+                </>
+              );
+            })() : (
               <rect
                 width={w}
                 height={h}
-                fill={comp.type === 'timer' || comp.type === 'switch' ? def.color : isTimerHigh ? def.color + '88' : def.color + '33'}
+                fill={def.category === 'active' || comp.type === 'switch' ? def.color : def.color + '33'}
                 stroke={def.color}
                 strokeWidth={1.5}
                 rx={4}
@@ -1024,28 +1319,55 @@ export default function Breadboard({
               />
             )}
 
-            {/* DIP chip rendering for 555 Timer */}
-            {comp.type === 'timer' && (
-              <>
-                {/* Pin 1 notch */}
-                <circle cx={w / 2} cy={h} r={3} fill="#0f172a" stroke="#888" strokeWidth={0.5} opacity={0.6} />
-                {/* Internal pin labels — left side (1-4, bottom to top) */}
-                <text x={5} y={h * 0.875 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">1 GND</text>
-                <text x={5} y={h * 0.625 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">2 TRG</text>
-                <text x={5} y={h * 0.375 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">3 OUT</text>
-                <text x={5} y={h * 0.125 + 0.5} fill="#c0c0c0" fontSize={3.5} pointerEvents="none">4 RST</text>
-                {/* Internal pin labels — right side (5-8, bottom to top) */}
-                <text x={w - 5} y={h * 0.875 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">CTL 5</text>
-                <text x={w - 5} y={h * 0.625 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">THR 6</text>
-                <text x={w - 5} y={h * 0.375 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">DIS 7</text>
-                <text x={w - 5} y={h * 0.125 + 0.5} fill="#c0c0c0" fontSize={3.5} textAnchor="end" pointerEvents="none">VCC 8</text>
-                {/* Output indicator LED */}
-                <circle cx={w / 2} cy={6} r={2} fill={isTimerHigh ? '#4ade80' : '#334155'} />
-              </>
-            )}
+            {/* Generic DIP chip rendering for all IC category components */}
+            {def.category === 'active' && comp.type !== 'display7seg' && comp.type !== 'ledmatrix' && (() => {
+              const leftPins = def.pins.filter((p) => p.side === 'left');
+              const rightPins = def.pins.filter((p) => p.side === 'right');
+              const totalPins = leftPins.length + rightPins.length;
+              const fontSize = totalPins <= 8 ? 3.5 : totalPins <= 12 ? 3 : 2.5;
+              const inset = totalPins <= 8 ? 5 : 4;
+              const notchR = totalPins <= 8 ? 3 : 2;
 
-            {/* Label (skip for LED, resistor, capacitor, switch — they show values/state instead) */}
-            {comp.type !== 'led' && comp.type !== 'resistor' && comp.type !== 'capacitor' && comp.type !== 'switch' && (
+              // Number pins: left bottom-to-top = 1..N, right bottom-to-top = N+1..2N
+              const leftSorted = [...leftPins].sort((a, b) => b.offset - a.offset);
+              const rightSorted = [...rightPins].sort((a, b) => b.offset - a.offset);
+
+              return (
+                <>
+                  {/* Pin 1 notch */}
+                  <circle cx={w / 2} cy={h} r={notchR} fill="#0f172a" stroke="#888" strokeWidth={0.5} opacity={0.6} />
+                  {/* Left pin labels */}
+                  {leftSorted.map((pin, i) => (
+                    <text key={pin.id} x={inset} y={h * pin.offset + 0.5} fill="#c0c0c0" fontSize={fontSize} pointerEvents="none">
+                      {i + 1} {pin.label}
+                    </text>
+                  ))}
+                  {/* Right pin labels */}
+                  {rightSorted.map((pin, i) => (
+                    <text key={pin.id} x={w - inset} y={h * pin.offset + 0.5} fill="#c0c0c0" fontSize={fontSize} textAnchor="end" pointerEvents="none">
+                      {pin.label} {leftSorted.length + i + 1}
+                    </text>
+                  ))}
+                  {/* Chip name */}
+                  <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={fontSize + 1} fontWeight="600" pointerEvents="none">
+                    {def.label}
+                  </text>
+                  {/* 555 Timer output indicator */}
+                  {comp.type === 'timer' && (
+                    <circle cx={w / 2} cy={h * 0.15} r={2} fill={isTimerHigh ? '#4ade80' : '#334155'} />
+                  )}
+                  {/* CD4026 count display */}
+                  {comp.type === 'cd4026' && simRunning && (
+                    <text x={w / 2} y={h / 2 + fontSize + 4} textAnchor="middle" fill="#4ade80" fontSize={5} fontWeight="700" pointerEvents="none">
+                      {comp.state?.count ?? 0}
+                    </text>
+                  )}
+                </>
+              );
+            })()}
+
+            {/* Label (skip for components with custom rendering) */}
+            {comp.type !== 'led' && comp.type !== 'resistor' && comp.type !== 'capacitor' && comp.type !== 'switch' && comp.type !== 'potentiometer' && comp.type !== 'display7seg' && comp.type !== 'multimeter' && def.category !== 'active' && (
               <text
                 x={w / 2}
                 y={comp.type === 'power' ? h / 2 - 2 : h / 2 + 4}
@@ -1104,6 +1426,7 @@ export default function Breadboard({
               </text>
             )}
 
+
             {/* Pins */}
             {def.pins.map((pin) => {
               const side = rotatedSide(pin.side, comp.rotation);
@@ -1114,15 +1437,19 @@ export default function Breadboard({
                 case 'top':    px = w * pin.offset; py = 0;  break;
                 case 'bottom': px = w * pin.offset; py = h;  break;
               }
-              // Position label inside the component, next to the pin
-              const inset = 8;
+
+              // Generic pin label placement: always inside component, inset from pin
+              const showLabel = def.category !== 'active' && comp.type !== 'switch';
+              const gridUnits = Math.min(def.width, def.height);
+              const labelSize = gridUnits <= 1 ? 3.5 : 4;
+              const inset = gridUnits <= 1 ? 5 : 7;
               let lx = px, ly = py;
               let anchor: 'start' | 'middle' | 'end' = 'middle';
               switch (side) {
-                case 'left':   lx = px + inset; anchor = 'start'; break;
-                case 'right':  lx = px - inset; anchor = 'end'; break;
-                case 'top':    ly = py + inset + 3 - (comp.type === 'resistor' ? 3 : comp.type === 'led' ? 1 : 0); break;
-                case 'bottom': ly = py - inset - (comp.type === 'resistor' ? 3 : comp.type === 'led' ? 4 : 0); break;
+                case 'left':   lx = px + inset; ly = py + 1; anchor = 'start'; break;
+                case 'right':  lx = px - inset; ly = py + 1; anchor = 'end'; break;
+                case 'top':    ly = py + inset; break;
+                case 'bottom': ly = py - inset + 3; break;
               }
 
               return (
@@ -1140,14 +1467,13 @@ export default function Breadboard({
                       handlePinMouseDown(comp.id, pin.id);
                     }}
                   />
-                  {comp.type !== 'timer' && (
+                  {showLabel && (
                     <text
                       x={lx}
-                      y={ly + 3}
+                      y={ly}
                       textAnchor={anchor}
-                      fill={comp.type === 'resistor' ? '#e2e8f0' : '#94a3b8'}
-                      fontSize={comp.type === 'resistor' ? 3.5 : 7}
-                      display={comp.type === 'switch' ? 'none' : undefined}
+                      fill="#e2e8f0"
+                      fontSize={labelSize}
                       pointerEvents="none"
                     >
                       {pin.label}
@@ -1157,6 +1483,52 @@ export default function Breadboard({
               );
             })}
           </g>
+        );
+      })}
+
+      {/* Simulation readouts — rendered on top of everything */}
+      {simRunning && components.map((comp) => {
+        if (comp.type === 'power' || comp.type === 'multimeter' || comp.type === 'display7seg' || comp.type === 'ledmatrix'
+          || comp.type.startsWith('gate_') || comp.type === 'opamp' || comp.type === 'cd4026' || comp.type === 'atmega328') return null;
+        const def = COMPONENT_DEFINITIONS[comp.type];
+        if (!def) return null;
+        const { w, h } = getRenderedSize(def, comp.rotation);
+
+        const voltage = Number(comp.state?.voltage ?? 0);
+        const current = Number(comp.state?.current ?? 0);
+        if (Math.abs(voltage) < 0.001 && Math.abs(current) < 0.001) return null;
+
+        const formatV = (v: number) => {
+          const av = Math.abs(v);
+          if (av < 0.01) return '0V';
+          if (av < 1) return (v * 1000).toFixed(0) + 'mV';
+          return v.toFixed(2) + 'V';
+        };
+        const formatI = (i: number) => {
+          const ai = Math.abs(i);
+          if (ai < 0.0001) return '';
+          if (ai < 0.001) return (i * 1e6).toFixed(0) + 'μA';
+          if (ai < 1) return (i * 1000).toFixed(1) + 'mA';
+          return i.toFixed(2) + 'A';
+        };
+
+        const vStr = formatV(voltage);
+        const iStr = formatI(current);
+        const label = iStr ? `${vStr} ${iStr}` : vStr;
+
+        return (
+          <text
+            key={`readout-${comp.id}`}
+            x={comp.position.x + w / 2}
+            y={comp.position.y + h + 7}
+            textAnchor="middle"
+            fill="#1e293b"
+            fontSize={4}
+            fontWeight="600"
+            pointerEvents="none"
+          >
+            {label}
+          </text>
         );
       })}
     </svg>

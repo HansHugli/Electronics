@@ -109,6 +109,50 @@ ipcMain.handle('get-config', () => {
   return loadConfig();
 });
 
+// ---- Chip Definitions ---- //
+
+function getChipsDir(): string {
+  const config = loadConfig();
+  return path.join(path.dirname(config.dataFilePath), 'chips');
+}
+
+ipcMain.handle('load-hex', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  if (!win) return null;
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Load AVR Hex File',
+    filters: [{ name: 'Intel HEX', extensions: ['hex'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const filePath = result.filePaths[0];
+  const data = fs.readFileSync(filePath, 'utf-8');
+  const name = path.basename(filePath);
+  return { filePath, name, data };
+});
+
+ipcMain.handle('load-chips', async () => {
+  const dir = getChipsDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    return [];
+  }
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+  const chips: unknown[] = [];
+  for (const file of files) {
+    try {
+      const data = fs.readFileSync(path.join(dir, file), 'utf-8');
+      const parsed = JSON.parse(data);
+      if (parsed.type && parsed.pins) {
+        chips.push(parsed);
+      }
+    } catch {
+      // Skip invalid files
+    }
+  }
+  return chips;
+});
+
 // ---- Window ---- //
 
 function createMainWindow() {
@@ -130,9 +174,12 @@ function createMainWindow() {
     mainWindow.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
 
-  if (isDev) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
-  }
+  // Open devtools with Ctrl+Shift+I (not by default)
+  mainWindow.webContents.on('before-input-event', (_event, input) => {
+    if (input.control && input.shift && input.key === 'I') {
+      mainWindow.webContents.toggleDevTools();
+    }
+  });
 }
 
 app.whenReady().then(() => {

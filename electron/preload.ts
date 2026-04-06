@@ -5,4 +5,6 @@ contextBridge.exposeInMainWorld('electronApi', {
   saveCircuit: (data: string, currentPath?: string) => ipcRenderer.invoke('save-circuit', data, currentPath),
   loadCircuit: () => ipcRenderer.invoke('load-circuit'),
   getConfig: () => ipcRenderer.invoke('get-config'),
+  loadChips: () => ipcRenderer.invoke('load-chips'),
+  loadHex: () => ipcRenderer.invoke('load-hex'),
 });

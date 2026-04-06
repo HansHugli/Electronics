@@ -164,9 +164,14 @@ textarea {
   font-size: 0.8rem;
 }
 
-.toolbar-btn:hover {
+.toolbar-btn:hover:not(:disabled) {
   background: #1e293b;
   color: #e2e8f0;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .toolbar-btn.active {
@@ -189,6 +194,22 @@ textarea {
   height: 20px;
   background: #334155;
   margin: 0 0.25rem;
+}
+
+.toolbar-speed-select {
+  padding: 0.2rem 0.4rem;
+  border: 1px solid #334155;
+  border-radius: 0.3rem;
+  background: #0f172a;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  cursor: pointer;
+  outline: none;
+}
+
+.toolbar-speed-select:hover {
+  border-color: #475569;
+  color: #e2e8f0;
 }
 
 .toolbar-circuit-name {
@@ -438,9 +459,179 @@ textarea {
   border-color: #38bdf8;
 }
 
+.prop-slider {
+  width: 100%;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: #334155;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.prop-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #38bdf8;
+  cursor: pointer;
+}
+
 .property-value {
   color: #64748b;
   font-size: 0.75rem;
+}
+
+/* ---- Probe Button ---- */
+
+.prop-probe-btn {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.35rem;
+  border: 1px solid #334155;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.prop-probe-btn:hover {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.prop-probe-btn.active {
+  background: #1e3a5f;
+  border-color: #38bdf8;
+  color: #38bdf8;
+}
+
+/* ---- Oscilloscope ---- */
+
+.scope-toggle-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem;
+  background: #0b1120;
+  border-top: 1px solid #1e293b;
+  flex-shrink: 0;
+}
+
+.scope-toggle-btn {
+  padding: 0.15rem 0.75rem;
+  border: 1px solid #334155;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.scope-toggle-btn:hover {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.oscilloscope-panel {
+  background: #0b1120;
+  border-top: 1px solid #1e293b;
+  padding: 0.5rem;
+  flex-shrink: 0;
+  max-height: 200px;
+}
+
+.scope-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.scope-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  white-space: nowrap;
+}
+
+.scope-traces-list {
+  display: flex;
+  gap: 0.4rem;
+  flex: 1;
+  overflow-x: auto;
+  align-items: center;
+}
+
+.scope-trace-tag {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid;
+  border-radius: 0.3rem;
+  font-size: 0.65rem;
+  color: #e2e8f0;
+  white-space: nowrap;
+}
+
+.scope-trace-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.scope-trace-remove {
+  background: none;
+  border: none;
+  color: #64748b;
+  font-size: 0.65rem;
+  cursor: pointer;
+  padding: 0 0.15rem;
+  line-height: 1;
+}
+
+.scope-trace-remove:hover {
+  color: #ef4444;
+}
+
+.scope-hint {
+  color: #475569;
+  font-size: 0.65rem;
+}
+
+.scope-close-btn {
+  background: none;
+  border: 1px solid #334155;
+  border-radius: 0.3rem;
+  color: #64748b;
+  font-size: 0.7rem;
+  cursor: pointer;
+  padding: 0.1rem 0.35rem;
+  line-height: 1;
+  margin-left: auto;
+}
+
+.scope-close-btn:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.scope-chart {
+  width: 100%;
+  height: 140px;
+}
+
+.scope-paused {
+  text-align: center;
+  color: #475569;
+  font-size: 0.65rem;
+  padding: 0.25rem;
 }
 
 /* ---- Modals ---- */

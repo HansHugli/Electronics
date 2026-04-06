@@ -15,8 +15,11 @@ function ComponentCard({ def, onDragStart }: { def: ComponentDefinition; onDragS
         onDragStart();
       }}
     >
-      <div className="component-card-icon" style={{ backgroundColor: def.color + '22', borderColor: def.color }}>
-        <span style={{ color: def.color }}>{def.label[0]}</span>
+      <div className="component-card-icon" style={{
+        backgroundColor: def.color + '22',
+        borderColor: def.color === '#1a1a1a' || def.color === '#2d2d2d' || def.color === '#4a4a4a' ? '#64748b' : def.color,
+      }}>
+        <span style={{ color: def.color === '#1a1a1a' || def.color === '#2d2d2d' || def.color === '#4a4a4a' ? '#94a3b8' : def.color }}>{def.label[0]}</span>
       </div>
       <div className="component-card-info">
         <span className="component-card-name">{def.label}</span>

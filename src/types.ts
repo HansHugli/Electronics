@@ -14,7 +14,7 @@ export interface Pin {
 export interface ComponentDefinition {
   type: string;
   label: string;
-  category: 'passive' | 'active' | 'power' | 'output' | 'input';
+  category: 'passive' | 'active' | 'power' | 'output' | 'input' | 'measurement';
   width: number;  // grid units
   height: number; // grid units
   pins: Pin[];

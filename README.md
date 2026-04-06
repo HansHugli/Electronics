@@ -1,71 +1,53 @@
 # E101 Electronics Simulator
 
-A desktop electronics circuit simulator built with React, TypeScript, and Electron.
-
-## Goals
-
-- Enable users to build and simulate electronics circuits using visual components.
-- Support breadboard-style wiring, digital and analog components, and exportable designs.
-- Provide a modern desktop experience with settings, file storage, and local persistence.
-
-## What's included
-
-- React + TypeScript renderer app under `src/`
-- Electron main/preload process under `electron/`
-- Vite bundler for fast development and builds
-- Electron Builder packaging config for Mac and Windows
-- Project plan and feature list in `PROJECT_PLAN.md`
+A desktop electronics circuit simulator built with React, TypeScript, and Electron. Build circuits on a realistic breadboard, wire components together, and run analog simulations — including real AVR microcontroller code.
 
 ## Getting started
 
-Install dependencies:
-
 ```bash
 npm install
-```
-
-Run the full Electron desktop app in development:
-
-```bash
 npm run electron-dev
 ```
 
-Build the app for release:
+## Features
 
-```bash
-npm run build
-```
+- Realistic dual-breadboard with internal wiring (power rails, 5-pin strips, center gap)
+- 15+ component types: resistors, capacitors, LEDs, switches, ICs, op-amps, 7-segment displays, LED matrix
+- Logic gates: AND (7408), OR (7432), NAND (7400), NOT (7404)
+- 555 Timer and CD4026 counter with full behavioral simulation
+- ATmega328P (Arduino Uno) with real AVR code execution via avr8js
+- Modified Nodal Analysis (MNA) analog simulation engine
+- Oscilloscope with multi-channel voltage probing
+- Undo/redo, copy/paste, component rotation
+- Save/open circuits as `.ecx` files
+- KiCad netlist and BOM export for PCB layout
+- Custom chip definitions via JSON files
+- Configurable simulation speed (0.25x to 10x)
+- Zoom and pan with mousewheel and Ctrl+click
 
-Package the app:
+For detailed usage instructions, see [FEATURES.md](FEATURES.md).
 
-```bash
-npm run package:win
-npm run package:mac
-```
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run electron-dev` | Run in dev mode (React + Electron) |
+| `npm run build` | Build for production |
+| `npm run package:win` | Package for Windows |
+| `npm run package:mac` | Package for macOS |
+| `npm run ship` | Full release: version bump, build, push |
 
 ## Project structure
 
-- `electron/` — Electron main and preload code
-- `public/` — Static assets and icons
+- `electron/` — Electron main and preload
 - `src/` — React app
-  - `src/components/` — UI components (Breadboard, Sidebar, Toolbar, PropertiesPanel)
-  - `src/data/` — Component definitions
-  - `src/engine/` — Circuit simulation engine
+  - `src/components/` — UI: Breadboard, Sidebar, Toolbar, PropertiesPanel, Oscilloscope
+  - `src/data/` — Component definitions, breadboard model, chip loader
+  - `src/engine/` — MNA solver, CircuitSimulator, AVR bridge, PCB export
+  - `src/hooks/` — Undo/redo history
+- `chips/` — Custom chip definition JSON files
 - `dist/` — Build output
 
-## Features (Phase 1)
+## Roadmap
 
-- Breadboard canvas with power supply area and grid
-- Component palette: DC/AC Power, Resistor, Capacitor, Switch, 555 Timer, LED
-- Drag-and-drop component placement
-- Orthogonal wire routing with rounded corners and obstacle avoidance
-- Click pins to draw wires with live preview
-- Component selection, property editing, and deletion (Del key)
-- Wire selection and deletion
-- 555 Timer with full 8-pin DIP pinout
-- DC/AC power supply with configurable voltage and waveform
-- Circuit simulation with LED blink demo
-- Save/Open circuits as `.ecx` files via native dialogs
-- Keyboard shortcuts (Ctrl+S, Ctrl+O, Delete, Escape)
-
-For the full roadmap, see `PROJECT_PLAN.md`.
+See [PROJECT_PLAN.md](PROJECT_PLAN.md) for the full roadmap.
