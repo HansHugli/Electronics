@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.3](https://github.com/HansHugli/Electronics/compare/v0.1.2...v0.1.3) (2026-04-06)
+
+
+### Features
+
+* UX polish, new ICs, oscilloscope, PCB export, and AVR simulation ([38ae63e](https://github.com/HansHugli/Electronics/commit/38ae63e7c8e939dda6c2e13f31736f1e1509e129))
+
 ## [0.1.2](https://github.com/HansHugli/Electronics/compare/v0.1.1...v0.1.2) (2026-04-06)
 
 
