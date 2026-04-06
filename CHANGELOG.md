@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.5](https://github.com/HansHugli/Electronics/compare/v0.1.4...v0.1.5) (2026-04-06)
+
+
+### Features
+
+* app polish, new components, Arduino sketch editor, and simulation accuracy ([dad73ea](https://github.com/HansHugli/Electronics/commit/dad73ea7e6c656bb9b3eeb224d79cfd01d9e60ab))
+
 ## [0.1.4](https://github.com/HansHugli/Electronics/compare/v0.1.3...v0.1.4) (2026-04-06)
 
 
