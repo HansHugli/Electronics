@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { PlacedComponent, Wire, Point } from './types';
 import { COMPONENT_DEFINITIONS } from './data/components';
-import { simulateCircuit, createBlinkDemoCircuit } from './engine/simulation';
+import { createBlinkDemoCircuit } from './engine/simulation';
+import { CircuitSimulator } from './engine/CircuitSimulator';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import Breadboard from './components/Breadboard';
@@ -34,6 +35,7 @@ function App() {
   const [pendingPowerDrop, setPendingPowerDrop] = useState<Point | null>(null);
   const simInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const simulator = useRef(new CircuitSimulator());
 
   // Simulation loop
   useEffect(() => {
@@ -54,7 +56,7 @@ function App() {
     if (!simRunning) return;
 
     setComponents((prev) => {
-      const states = simulateCircuit(prev, wires, simTime);
+      const states = simulator.current.tick(prev, wires, simTime, 0.1);
       return prev.map((comp) => {
         const newState = states.get(comp.id);
         return newState ? { ...comp, state: newState } : comp;
@@ -174,6 +176,7 @@ function App() {
     setSimRunning((prev) => !prev);
     if (simRunning) {
       setSimTime(0);
+      simulator.current.reset();
       setComponents((prev) => prev.map((c) => ({ ...c, state: {} })));
     }
   }, [simRunning]);

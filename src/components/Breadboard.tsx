@@ -844,7 +844,8 @@ export default function Breadboard({
         const ledColor = comp.type === 'led'
           ? ledColorMap[comp.properties.color as string] || def.color
           : def.color;
-        const isLedOn = comp.type === 'led' && comp.state?.on;
+        const ledBrightness = comp.type === 'led' ? Number(comp.state?.brightness ?? 0) : 0;
+        const isLedOn = ledBrightness > 0;
         const isSwitchClosed = comp.type === 'switch' && comp.state?.closed;
         const isTimerHigh = comp.type === 'timer' && comp.state?.outputHigh;
 
@@ -969,7 +970,7 @@ export default function Breadboard({
             })() : comp.type === 'led' ? (
               <>
                 {isLedOn && (
-                  <circle cx={w / 2} cy={h / 2} r={w / 2 + 8} fill={ledColor} opacity={0.6} />
+                  <circle cx={w / 2} cy={h / 2} r={w / 2 + 4 + 6 * ledBrightness} fill={ledColor} opacity={0.2 + 0.5 * ledBrightness} />
                 )}
                 <circle
                   cx={w / 2}

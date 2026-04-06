@@ -79,9 +79,7 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
       { id: 'dis',   label: 'DIS',  side: 'right', offset: 0.375, type: 'output' },
       { id: 'vcc',   label: 'VCC',  side: 'right', offset: 0.125, type: 'input' },
     ],
-    properties: {
-      interval: { label: 'Interval', default: 2000, unit: 'ms' },
-    },
+    properties: {},
   },
   power: {
     type: 'power',
