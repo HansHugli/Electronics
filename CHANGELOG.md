@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.4](https://github.com/HansHugli/Electronics/compare/v0.1.3...v0.1.4) (2026-04-06)
+
+
+### Bug Fixes
+
+* correct build order and move electron to devDependencies ([6c1868f](https://github.com/HansHugli/Electronics/commit/6c1868fd82488146b956adf6f65d4d4c3e1be5ad))
+* packaged app loads local HTML instead of localhost ([5c45b08](https://github.com/HansHugli/Electronics/commit/5c45b08515257a593d837ab68272cfe9b8c09583))
+* use relative asset paths for Electron file:// protocol ([1544cf1](https://github.com/HansHugli/Electronics/commit/1544cf1d434126c240312bb8d08a0279334054df))
+
 ## [0.1.3](https://github.com/HansHugli/Electronics/compare/v0.1.2...v0.1.3) (2026-04-06)
 
 
