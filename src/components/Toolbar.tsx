@@ -13,6 +13,7 @@ interface ToolbarProps {
   onSimSpeedChange: (speed: number) => void;
   simAccuracy: number;
   onSimAccuracyChange: (accuracy: number) => void;
+  onShowPCB: () => void;
   onExportNetlist: () => void;
   onExportBOM: () => void;
   saveStatus: string | null;
@@ -27,6 +28,7 @@ export default function Toolbar({
   onSimSpeedChange,
   simAccuracy,
   onSimAccuracyChange,
+  onShowPCB,
   onExportNetlist,
   onExportBOM,
   saveStatus,
@@ -42,9 +44,16 @@ export default function Toolbar({
           <span className="toolbar-btn-icon">🔢</span>
           <span className="toolbar-btn-label">Counter</span>
         </button>
+        <button type="button" className="toolbar-btn" onClick={() => onLoadDemo('avr-blink')} title="ATmega328P Blink Demo (pre-loaded hex)">
+          <span className="toolbar-btn-icon">Av</span>
+          <span className="toolbar-btn-label">AVR Blink</span>
+        </button>
         <div className="toolbar-separator" />
-        <button type="button" className="toolbar-btn" onClick={onExportNetlist} title="Export KiCad netlist (.net)">
+        <button type="button" className="toolbar-btn" onClick={onShowPCB} title="PCB layout preview">
           <span className="toolbar-btn-icon">PCB</span>
+        </button>
+        <button type="button" className="toolbar-btn" onClick={onExportNetlist} title="Export KiCad netlist (.net)">
+          <span className="toolbar-btn-icon">.net</span>
         </button>
         <button type="button" className="toolbar-btn" onClick={onExportBOM} title="Export Bill of Materials (.csv)">
           <span className="toolbar-btn-icon">BOM</span>

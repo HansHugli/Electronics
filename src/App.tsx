@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { PlacedComponent, Wire, Point } from './types';
 import { COMPONENT_DEFINITIONS } from './data/components';
 import { GRID_W, GRID_H } from './data/breadboard';
-import { createBlinkDemoCircuit, createCounterDemoCircuit } from './engine/simulation';
+import { createBlinkDemoCircuit, createCounterDemoCircuit, createAVRBlinkDemoCircuit, AVR_BLINK_HEX } from './engine/simulation';
 import { CircuitSimulator } from './engine/CircuitSimulator';
 import { useHistory } from './hooks/useHistory';
 import { loadExternalChips } from './data/chipLoader';
@@ -15,6 +15,9 @@ import Oscilloscope, { useOscilloscope } from './components/Oscilloscope';
 import AboutDialog from './components/AboutDialog';
 import SettingsDialog from './components/SettingsDialog';
 import SketchEditor from './components/SketchEditor';
+import SerialMonitor from './components/SerialMonitor';
+import PCBView from './components/PCBView';
+import ContextMenu from './components/ContextMenu';
 import { generateKiCadNetlist, generateBOM } from './engine/pcbExport';
 
 let nextId = 1;
@@ -68,7 +71,9 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showSketchEditor, setShowSketchEditor] = useState(false);
   const sketchTargetId = useRef<string | null>(null);
-  const simInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [serialVisible, setSerialVisible] = useState(false);
+  const [showPCBView, setShowPCBView] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; componentId?: string; wireId?: string } | null>(null);
   const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const simulator = useRef(new CircuitSimulator());
   const history = useHistory();
@@ -102,39 +107,45 @@ function App() {
     window.electronApi?.setTitle?.(title);
   }, [circuitName]);
 
-  // Simulation loop — tick interval adjusts with speed
-  const tickMs = Math.round(100 / simSpeed);
-  const dtPerTick = 0.1; // always 100ms of sim time per tick (speed changes real-time pacing)
+  // Simulation loop — simple setInterval with tick guard
+  const simIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wiresRef = useRef(wires);
+  wiresRef.current = wires;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
 
   useEffect(() => {
+    // Clear any existing interval first (guards against StrictMode double-mount)
+    if (simIntervalRef.current) {
+      clearInterval(simIntervalRef.current);
+      simIntervalRef.current = null;
+    }
     if (simRunning) {
-      simInterval.current = setInterval(() => {
-        setSimTime((t) => t + Math.round(100 * simSpeed));
+      const tickMs = Math.round(100 / simSpeed);
+      simIntervalRef.current = setInterval(() => {
+        setSimTime((prev) => {
+          const next = prev + 100;
+          simulator.current.subSteps = simAccuracy;
+          setComponents((comps) => {
+            const states = simulator.current.tick(comps, wiresRef.current, next, 0.1);
+            const updated = comps.map((comp) => {
+              const newState = states.get(comp.id);
+              return newState ? { ...comp, state: newState } : comp;
+            });
+            scopeRef.current.recordTick(updated, next);
+            return updated;
+          });
+          return next;
+        });
       }, tickMs);
-    } else {
-      if (simInterval.current) clearInterval(simInterval.current);
     }
     return () => {
-      if (simInterval.current) clearInterval(simInterval.current);
+      if (simIntervalRef.current) {
+        clearInterval(simIntervalRef.current);
+        simIntervalRef.current = null;
+      }
     };
-  }, [simRunning, simSpeed, tickMs]);
-
-  // Run simulation each tick
-  useEffect(() => {
-    if (!simRunning) return;
-
-    simulator.current.subSteps = simAccuracy;
-    setComponents((prev) => {
-      const states = simulator.current.tick(prev, wires, simTime, dtPerTick);
-      const next = prev.map((comp) => {
-        const newState = states.get(comp.id);
-        return newState ? { ...comp, state: newState } : comp;
-      });
-      // Record oscilloscope data
-      scope.recordTick(next, simTime);
-      return next;
-    });
-  }, [simTime, simRunning, wires, scope]);
+  }, [simRunning, simSpeed, simAccuracy]);
 
   const handleDropComponent = useCallback((type: string, position: Point) => {
     if (type === 'power') {
@@ -298,12 +309,14 @@ function App() {
   }, [wires, history]);
 
   const handleToggleSimulation = useCallback(() => {
-    setSimRunning((prev) => !prev);
     if (simRunning) {
+      setSimRunning(false);
       setSimTime(0);
       simulator.current.reset();
       setComponents((prev) => prev.map((c) => ({ ...c, state: {} })));
       scope.clearTraces();
+    } else {
+      setSimRunning(true);
     }
   }, [simRunning, scope]);
 
@@ -466,32 +479,28 @@ function App() {
   // ---- Demo ---- //
 
   const handleLoadDemo = useCallback(async (demoName?: string) => {
-    const name = demoName === 'counter' ? '7-Seg Counter Demo' : 'LED Blink Demo';
-    const fileName = demoName === 'counter' ? '7-Seg Counter Demo' : 'LED Blink Demo';
+    const demoMap: Record<string, { name: string; create: () => { components: PlacedComponent[]; wires: Wire[] } }> = {
+      blink:      { name: 'LED Blink Demo',     create: createBlinkDemoCircuit },
+      counter:    { name: '7-Seg Counter Demo',  create: createCounterDemoCircuit },
+      'avr-blink': { name: 'AVR Blink Demo',    create: createAVRBlinkDemoCircuit },
+    };
+    const key = demoName ?? 'blink';
+    const entry = demoMap[key] ?? demoMap.blink;
 
-    // Try loading from disk first (Electron only)
-    if (window.electronApi?.loadNamedCircuit) {
-      const result = await window.electronApi.loadNamedCircuit(fileName);
-      if (result) {
-        try {
-          const parsed = JSON.parse(result.data);
-          if (parsed.components && parsed.wires) {
-            loadCircuitState(parsed, result.name, result.filePath);
-            simulator.current.reset();
-            return;
-          }
-        } catch { /* fall through to generate */ }
-      }
-    }
-
-    // Generate the demo and save to disk for next time
-    const circuit = demoName === 'counter' ? createCounterDemoCircuit() : createBlinkDemoCircuit();
-    loadCircuitState(circuit, name);
+    // Always generate from code (demos are code-defined, not user files)
+    const circuit = entry.create();
+    loadCircuitState(circuit, entry.name);
     simulator.current.reset();
 
+    // For AVR demos, pre-load the hex program
+    if (key === 'avr-blink') {
+      simulator.current.loadAVRProgram('avr1', AVR_BLINK_HEX);
+    }
+
+    // Save to disk so user can find/modify them
     if (window.electronApi?.saveDemo) {
       const data = JSON.stringify(circuit, null, 2);
-      const filePath = await window.electronApi.saveDemo(fileName, data);
+      const filePath = await window.electronApi.saveDemo(entry.name, data);
       setCurrentFilePath(filePath);
     } else {
       setCurrentFilePath(undefined);
@@ -589,6 +598,7 @@ function App() {
         setWiringFrom(null);
         setSelectedComponentId(null);
         setSelectedWireId(null);
+        setContextMenu(null);
         return;
       }
       if (e.key === 'r' || e.key === 'R') {
@@ -692,6 +702,7 @@ function App() {
           onSimSpeedChange={setSimSpeed}
           simAccuracy={simAccuracy}
           onSimAccuracyChange={setSimAccuracy}
+          onShowPCB={() => setShowPCBView(true)}
           onExportNetlist={handleExportNetlist}
           onExportBOM={handleExportBOM}
           saveStatus={saveStatus}
@@ -714,6 +725,9 @@ function App() {
             onToggleSwitch={handleToggleSwitch}
             wireCurrents={simulator.current.wireCurrents}
             pinHoleVoltages={simulator.current.pinHoleVoltages}
+            onContextMenu={(e, compId, wireId) => {
+              setContextMenu({ x: e.clientX, y: e.clientY, componentId: compId, wireId });
+            }}
           />
           {wiringFrom && (
             <div className="wiring-hint">Click a pin to complete the wire, or press Escape to cancel</div>
@@ -732,6 +746,12 @@ function App() {
           onRemoveProbe={scope.removeProbe}
           probedIds={scope.probedIds}
           components={components}
+          simRunning={simRunning}
+        />
+        <SerialMonitor
+          components={components}
+          visible={serialVisible}
+          onToggle={() => setSerialVisible((v) => !v)}
           simRunning={simRunning}
         />
       </div>
@@ -766,6 +786,7 @@ function App() {
       )}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {showPCBView && <PCBView components={components} wires={wires} onClose={() => setShowPCBView(false)} />}
       {showSketchEditor && (
         <SketchEditor
           onCompiled={(hex) => {
@@ -778,6 +799,29 @@ function App() {
           onClose={() => setShowSketchEditor(false)}
         />
       )}
+      {contextMenu && (() => {
+        const items: { label: string; shortcut?: string; onClick: () => void; danger?: boolean }[] = [];
+        if (contextMenu.componentId) {
+          const comp = components.find((c) => c.id === contextMenu.componentId);
+          if (comp && comp.type !== 'power') {
+            items.push({ label: 'Rotate', shortcut: 'R', onClick: () => {
+              setComponents((prev) => prev.map((c) => c.id === contextMenu.componentId ? { ...c, rotation: (c.rotation + 90) % 360 } : c));
+            }});
+          }
+          items.push({ label: 'Copy', shortcut: 'Ctrl+C', onClick: () => {
+            if (comp) clipboard.current = { ...comp };
+          }});
+          items.push({ label: 'Delete', shortcut: 'Del', danger: true, onClick: () => {
+            if (contextMenu.componentId) handleDeleteComponent(contextMenu.componentId);
+          }});
+        } else if (contextMenu.wireId) {
+          items.push({ label: 'Delete Wire', shortcut: 'Del', danger: true, onClick: () => {
+            if (contextMenu.wireId) handleDeleteWire(contextMenu.wireId);
+          }});
+        }
+        if (items.length === 0) return null;
+        return <ContextMenu x={contextMenu.x} y={contextMenu.y} items={items} onClose={() => setContextMenu(null)} />;
+      })()}
     </div>
   );
 }

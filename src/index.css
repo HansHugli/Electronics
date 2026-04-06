@@ -398,6 +398,16 @@ textarea {
   min-width: 1.5rem;
 }
 
+.property-hint {
+  background: #1e293b;
+  color: #94a3b8;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
 .property-row-col {
   display: flex;
   flex-direction: column;
@@ -645,6 +655,95 @@ textarea {
   color: #475569;
   font-size: 0.65rem;
   padding: 0.25rem;
+}
+
+/* ---- Serial Monitor ---- */
+
+.serial-toggle-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem;
+  background: #0b1120;
+  border-top: 1px solid #1e293b;
+  flex-shrink: 0;
+}
+
+.serial-panel {
+  background: #0b1120;
+  border-top: 1px solid #1e293b;
+  padding: 0.5rem;
+  flex-shrink: 0;
+  max-height: 160px;
+  display: flex;
+  flex-direction: column;
+}
+
+.serial-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.serial-hint {
+  color: #475569;
+  font-size: 0.65rem;
+}
+
+.serial-output {
+  flex: 1;
+  background: #0a0a0a;
+  border: 1px solid #1e293b;
+  border-radius: 0.3rem;
+  padding: 0.4rem 0.6rem;
+  color: #4ade80;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  min-height: 60px;
+}
+
+.serial-empty {
+  color: #475569;
+  font-style: italic;
+}
+
+/* ---- PCB View ---- */
+
+.modal.pcb-modal {
+  width: 92vw;
+  height: 90vh;
+  max-width: 92vw;
+  max-height: 90vh;
+}
+
+.pcb-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.pcb-canvas-wrap {
+  background: #0a0a0a;
+  border: 1px solid #1e293b;
+  border-radius: 0.4rem;
+  padding: 0.5rem;
+  margin-bottom: 0.75rem;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.pcb-canvas {
+  width: 100%;
+  height: auto;
+  min-height: 200px;
 }
 
 /* ---- Modals ---- */
@@ -1068,4 +1167,55 @@ textarea {
 .sidebar-footer-btn:hover {
   background: #1e293b;
   color: #e2e8f0;
+}
+
+/* Context menu */
+.context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 160px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  background: none;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.context-menu-item:hover {
+  background: #334155;
+}
+
+.context-menu-item.danger {
+  color: #f87171;
+}
+
+.context-menu-item.danger:hover {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.context-menu-shortcut {
+  color: #64748b;
+  font-size: 0.7rem;
+  margin-left: 16px;
 }

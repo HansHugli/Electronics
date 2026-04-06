@@ -1,6 +1,7 @@
 import { useRef, useCallback, useMemo, useState } from 'react';
 import { PlacedComponent, Wire, Point } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
+import { formatValue, formatVoltage, formatCurrent } from '../utils/format';
 import {
   GRID_W, GRID_H, TOTAL_ROWS, BOARD_TOTAL_COLS,
   BOARD_PIXEL_WIDTH, BOARD_PIXEL_HEIGHT,
@@ -31,6 +32,7 @@ interface BreadboardProps {
   onToggleSwitch: (id: string) => void;
   wireCurrents: Map<string, number>;
   pinHoleVoltages: Map<string, number>;
+  onContextMenu?: (e: React.MouseEvent, componentId?: string, wireId?: string) => void;
 }
 
 /**
@@ -425,6 +427,7 @@ export default function Breadboard({
   onToggleSwitch,
   wireCurrents,
   pinHoleVoltages,
+  onContextMenu,
 }: BreadboardProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<{ id: string; offsetX: number; offsetY: number; type: string; rotation: number } | null>(null);
@@ -692,14 +695,19 @@ export default function Breadboard({
     [wiringFrom, onStartWire, onEndWire]
   );
 
-  // Compute highlighted holes for the hovered strip
+  // Compute highlighted holes for the hovered strip + coordinate label
   const highlightedHoles = useMemo(() => {
     if (!hoveredHole) return null;
     const groupId = pinLookup.get(hoveredHole);
     if (!groupId) return null;
     const pins = pinGroupMap.get(groupId);
     if (!pins) return null;
-    return pins.map(({ col, row }) => {
+    const [hc, hr] = hoveredHole.split(',').map(Number);
+    const hPos = gridToPixel(hc, hr);
+    const holeVoltage = simRunning && pinHoleVoltages ? (pinHoleVoltages.get(hoveredHole) ?? 0) : 0;
+    const voltageStr = Math.abs(holeVoltage) > 0.01 ? `  ${holeVoltage.toFixed(2)}V` : '';
+    const labelText = `(${hc},${hr})${voltageStr}`;
+    const elements = pins.map(({ col, row }) => {
       const { x, y } = gridToPixel(col, row);
       return (
         <circle
@@ -712,7 +720,23 @@ export default function Breadboard({
         />
       );
     });
-  }, [hoveredHole, pinLookup, pinGroupMap]);
+    elements.push(
+      <g key="hover-label" pointerEvents="none">
+        <rect
+          x={hPos.x + 5} y={hPos.y - 10}
+          width={labelText.length * 3.2 + 4} height={8}
+          rx={2} fill="rgba(30,41,59,0.9)" stroke="#475569" strokeWidth={0.4}
+        />
+        <text
+          x={hPos.x + 7} y={hPos.y - 4}
+          fill="#e2e8f0" fontSize={4.5} fontWeight="500"
+        >
+          {labelText}
+        </text>
+      </g>
+    );
+    return elements;
+  }, [hoveredHole, pinLookup, pinGroupMap, simRunning, pinHoleVoltages]);
 
   // Build pin hole elements for all breadboards
   const pinHoles = useMemo(() => {
@@ -740,12 +764,9 @@ export default function Breadboard({
           color = holeVoltage > 0 ? '#4ade80' : '#60a5fa';
           strokeColor = holeVoltage > 0 ? '#22c55e' : '#3b82f6';
           r = 3;
-        } else if (isPositiveRail) {
-          color = '#ef444466';
-          strokeColor = '#ef444455';
-        } else if (isNegativeRail) {
-          color = '#3b82f666';
-          strokeColor = '#3b82f655';
+        } else if (isPositiveRail || isNegativeRail) {
+          color = '#111111';
+          strokeColor = '#000000';
         } else {
           color = '#1a1a1a';
           strokeColor = '#00000022';
@@ -788,7 +809,7 @@ export default function Breadboard({
             <line
               key={`trace-comp-${bi}-${startCol}-${row}`}
               x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y}
-              stroke="#b0a898" strokeWidth={1} opacity={0.4}
+              stroke="#5a4f3e" strokeWidth={1} opacity={0.5}
             />
           );
         }
@@ -805,7 +826,7 @@ export default function Breadboard({
             <line
               key={`trace-rail-pos-${bi}-${railCol}-${g}`}
               x1={pp1.x} y1={pp1.y} x2={pp2.x} y2={pp2.y}
-              stroke="#ef4444" strokeWidth={1} opacity={0.15}
+              stroke="#7f2222" strokeWidth={1} opacity={0.5}
             />
           );
           const np1 = gridToPixel(railCol + 1, startRow);
@@ -814,20 +835,10 @@ export default function Breadboard({
             <line
               key={`trace-rail-neg-${bi}-${railCol}-${g}`}
               x1={np1.x} y1={np1.y} x2={np2.x} y2={np2.y}
-              stroke="#3b82f6" strokeWidth={1} opacity={0.15}
+              stroke="#1e3a6e" strokeWidth={1} opacity={0.5}
             />
           );
-          for (let r = startRow; r <= endRow; r++) {
-            const lp = gridToPixel(railCol, r);
-            const rp = gridToPixel(railCol + 1, r);
-            traces.push(
-              <line
-                key={`trace-rail-h-${bi}-${railCol}-${r}`}
-                x1={lp.x} y1={lp.y} x2={rp.x} y2={rp.y}
-                stroke="#b0a898" strokeWidth={0.5} opacity={0.3}
-              />
-            );
-          }
+          // No horizontal traces — + and - rails are separate buses
         }
       }
     }
@@ -917,6 +928,13 @@ export default function Breadboard({
               strokeWidth={12}
               fill="none"
               onMouseDown={(e) => handleWireClick(e, wire.id)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onSelectWire(wire.id);
+                onSelectComponent(null);
+                onContextMenu?.(e, undefined, wire.id);
+              }}
               className="wire-hitbox"
             />
             <path
@@ -1010,6 +1028,13 @@ export default function Breadboard({
                 return;
               }
               handleComponentMouseDown(e, comp.id);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onSelectComponent(comp.id);
+              onSelectWire(null);
+              onContextMenu?.(e, comp.id, undefined);
             }}
           >
             {/* Selection highlight */}
@@ -1122,9 +1147,10 @@ export default function Breadboard({
                   cx={w / 2}
                   cy={h / 2}
                   r={w / 2 - 1}
-                  fill={ledColor}
+                  fill={isLedOn ? ledColor : '#333'}
                   stroke={ledColor}
                   strokeWidth={1.5}
+                  opacity={isLedOn ? 1 : 0.4}
                 />
               </>
             ) : comp.type === 'potentiometer' ? (() => {
@@ -1392,7 +1418,7 @@ export default function Breadboard({
                 fontWeight="600"
                 pointerEvents="none"
               >
-                {comp.properties.resistance}{def.properties?.resistance?.unit || 'Ω'}
+                {formatValue(Number(comp.properties.resistance ?? 220), 'Ω')}
               </text>
             )}
 
@@ -1407,7 +1433,7 @@ export default function Breadboard({
                 fontWeight="600"
                 pointerEvents="none"
               >
-                {comp.properties.capacitance}{def.properties?.capacitance?.unit || 'μF'}
+                {formatValue(Number(comp.properties.capacitance ?? 100), 'F', -6)}
               </text>
             )}
 
@@ -1499,37 +1525,35 @@ export default function Breadboard({
         const current = Number(comp.state?.current ?? 0);
         if (Math.abs(voltage) < 0.001 && Math.abs(current) < 0.001) return null;
 
-        const formatV = (v: number) => {
-          const av = Math.abs(v);
-          if (av < 0.01) return '0V';
-          if (av < 1) return (v * 1000).toFixed(0) + 'mV';
-          return v.toFixed(2) + 'V';
-        };
-        const formatI = (i: number) => {
-          const ai = Math.abs(i);
-          if (ai < 0.0001) return '';
-          if (ai < 0.001) return (i * 1e6).toFixed(0) + 'μA';
-          if (ai < 1) return (i * 1000).toFixed(1) + 'mA';
-          return i.toFixed(2) + 'A';
-        };
-
-        const vStr = formatV(voltage);
-        const iStr = formatI(current);
+        const vStr = formatVoltage(voltage);
+        const iStr = formatCurrent(current);
         const label = iStr ? `${vStr} ${iStr}` : vStr;
 
+        const rx = comp.position.x + w / 2;
+        const ry = comp.position.y + h + 7;
         return (
-          <text
-            key={`readout-${comp.id}`}
-            x={comp.position.x + w / 2}
-            y={comp.position.y + h + 7}
-            textAnchor="middle"
-            fill="#1e293b"
-            fontSize={4}
-            fontWeight="600"
-            pointerEvents="none"
-          >
-            {label}
-          </text>
+          <g key={`readout-${comp.id}`} pointerEvents="none">
+            <rect
+              x={rx - label.length * 1.6 - 2}
+              y={ry - 3.5}
+              width={label.length * 3.2 + 4}
+              height={5.5}
+              rx={2}
+              fill="rgba(255,255,255,0.85)"
+              stroke="#cbd5e1"
+              strokeWidth={0.3}
+            />
+            <text
+              x={rx}
+              y={ry}
+              textAnchor="middle"
+              fill="#1e293b"
+              fontSize={4}
+              fontWeight="600"
+            >
+              {label}
+            </text>
+          </g>
         );
       })}
     </svg>

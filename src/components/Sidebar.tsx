@@ -15,6 +15,7 @@ function ComponentCard({ def, onDragStart }: { def: ComponentDefinition; onDragS
     <div
       className="component-card"
       draggable
+      title={def.description ? `${def.label} — ${def.description}\nDrag onto the breadboard to place.` : `${def.label}\nDrag onto the breadboard to place.`}
       onDragStart={(e) => {
         e.dataTransfer.setData('componentType', def.type);
         onDragStart();

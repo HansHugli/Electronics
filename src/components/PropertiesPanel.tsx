@@ -1,5 +1,6 @@
 import { PlacedComponent, Wire } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
+import { formatValue } from '../utils/format';
 
 const WIRE_COLOR_OPTIONS = [
   { color: '#ef4444', label: 'Red' },
@@ -29,9 +30,23 @@ interface PropertiesPanelProps {
 export default function PropertiesPanel({ component, onPropertyChange, onRotate, selectedWire, onWireColorChange, onProbe, isProbed, onLoadHex, isHexLoaded, onWriteSketch }: PropertiesPanelProps) {
   // Wire selected — show wire properties
   if (selectedWire) {
+    const fmtEndpoint = (ep: { componentId: string; pinId: string }) =>
+      ep.componentId === 'board' ? `Board [${ep.pinId}]` : `${ep.componentId}.${ep.pinId}`;
     return (
       <div className="properties-panel">
         <h3>Wire</h3>
+        <div className="property-row">
+          <label>ID</label>
+          <span className="property-value">{selectedWire.id}</span>
+        </div>
+        <div className="property-row">
+          <label>From</label>
+          <span className="property-value">{fmtEndpoint(selectedWire.from)}</span>
+        </div>
+        <div className="property-row">
+          <label>To</label>
+          <span className="property-value">{fmtEndpoint(selectedWire.to)}</span>
+        </div>
         <div className="property-row-col">
           <label>Color</label>
           <div className="color-picker">
@@ -201,6 +216,19 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
             );
           }
 
+          // Build engineering-notation hint for numeric properties with units
+          const unitMap: Record<string, { base: string; exp: number }> = {
+            'Ω': { base: 'Ω', exp: 0 },
+            'μF': { base: 'F', exp: -6 },
+            'V': { base: 'V', exp: 0 },
+            'A': { base: 'A', exp: 0 },
+            'Hz': { base: 'Hz', exp: 0 },
+          };
+          const mapped = prop.unit ? unitMap[prop.unit] : undefined;
+          const hint = mapped && typeof value === 'number'
+            ? formatValue(value, mapped.base, mapped.exp)
+            : undefined;
+
           return (
             <div key={key} className="property-row">
               <label>{prop.label}</label>
@@ -214,7 +242,10 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
                     onPropertyChange(component.id, key, val);
                   }}
                 />
-                {prop.unit && <span className="property-unit">{prop.unit}</span>}
+                {hint
+                  ? <span className="property-unit property-hint" title={`${value} ${prop.unit}`}>{hint}</span>
+                  : prop.unit && <span className="property-unit">{prop.unit}</span>
+                }
               </div>
             </div>
           );

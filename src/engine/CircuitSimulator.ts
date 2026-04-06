@@ -255,6 +255,8 @@ export class CircuitSimulator {
     }
 
     // Board pin wire endpoints → breadboard holes
+    // When a board hole is referenced, register ALL holes in its group
+    // so the full strip/rail is connected internally.
     for (const wire of wires) {
       for (const endpoint of [wire.from, wire.to]) {
         if (endpoint.componentId === 'board') {
@@ -264,8 +266,23 @@ export class CircuitSimulator {
           const groupId = boardPinLookup.get(`${col},${row}`);
           if (!groupId) continue;
           const pk = pinKey(endpoint.componentId, endpoint.pinId);
-          if (!groupToPins.has(groupId)) groupToPins.set(groupId, []);
-          groupToPins.get(groupId)!.push(pk);
+          if (!groupToPins.has(groupId)) {
+            groupToPins.set(groupId, []);
+            // Register all holes in this group so internal wiring works
+            const group = boardPinGroups.find((g) => g.id === groupId);
+            if (group) {
+              for (const gpin of group.pins) {
+                const gpk = pinKey('board', `${gpin.col},${gpin.row}`);
+                find(gpk);
+                groupToPins.get(groupId)!.push(gpk);
+              }
+            }
+          }
+          // Also add this specific endpoint if not already present
+          if (!groupToPins.get(groupId)!.includes(pk)) {
+            find(pk);
+            groupToPins.get(groupId)!.push(pk);
+          }
         }
       }
     }
@@ -801,16 +818,37 @@ export class CircuitSimulator {
       }
     }
 
+    // Save pre-LED voltages for Step 7 and cap storage
+    // The LED second-pass re-solve changes the matrix, corrupting these values
+    const preLedVoltages = new Map<string, { vTrig: number; vThr: number; vcc: number }>();
+    for (const info of timerInfos) {
+      preLedVoltages.set(info.comp.id, {
+        vTrig: nodeVoltage(info.nodeTrig),
+        vThr: nodeVoltage(info.nodeThr),
+        vcc: nodeVoltage(info.nodeVcc),
+      });
+    }
+    const preLedCapVoltages = new Map<string, number>();
+    for (const comp of components) {
+      if (comp.type === 'capacitor') {
+        const vP = nodeVoltage(getNode(comp.id, 'pos'));
+        const vN = nodeVoltage(getNode(comp.id, 'neg'));
+        preLedCapVoltages.set(comp.id, vP - vN);
+      }
+    }
+
     if (needResolve) {
       x = solve(G, b);
       if (!x) return results;
     }
 
     // === Step 7: Update 555 Timer flip-flop state ===
+    // Use pre-LED-resolve voltages so the LED re-solve doesn't corrupt timer thresholds
     for (const info of timerInfos) {
-      const vcc = nodeVoltage(info.nodeVcc);
-      const vTrig = nodeVoltage(info.nodeTrig);
-      const vThr = nodeVoltage(info.nodeThr);
+      const saved = preLedVoltages.get(info.comp.id)!;
+      const vcc = saved.vcc;
+      const vTrig = saved.vTrig;
+      const vThr = saved.vThr;
 
       let ff = this.state.timer555.get(info.comp.id)!;
 
@@ -823,6 +861,7 @@ export class CircuitSimulator {
           ff = false; // RESET
         }
       }
+
 
       this.state.timer555.set(info.comp.id, ff);
 
@@ -859,16 +898,15 @@ export class CircuitSimulator {
       }
     }
 
-    // Capacitors: update stored voltage
+    // Capacitors: update stored voltage (use pre-LED values for accuracy)
     for (const comp of components) {
       if (comp.type === 'capacitor') {
-        const vPos = nodeVoltage(getNode(comp.id, 'pos'));
-        const vNeg = nodeVoltage(getNode(comp.id, 'neg'));
-        const vCap = vPos - vNeg;
+        const vCap = preLedCapVoltages.get(comp.id) ?? 0;
+        const vPrevCap = this.state.capVoltages.get(comp.id) ?? 0;
         this.state.capVoltages.set(comp.id, vCap);
 
         const C = Number(comp.properties.capacitance ?? 100) * 1e-6;
-        const vPrev = this.state.capVoltages.get(comp.id) ?? 0;
+        const vPrev = vPrevCap;
         const current = C * (vCap - vPrev) / dt;
 
         const state = results.get(comp.id) ?? {};

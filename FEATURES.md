@@ -181,5 +181,6 @@ See `chips/example-shift-register.json` for a complete example.
 
 ## Demos
 
-- **Blink** — 555 astable circuit driving an LED (Ra=10k, Rb=68k, C=47uF)
+- **Blink** — 555 astable circuit driving an LED (Ra=47k, Rb=68k, C=47uF)
 - **Counter** — 555 astable driving a CD4026 decade counter into a 7-segment display
+- **AVR Blink** — ATmega328P running a pre-loaded Arduino Blink sketch (pin 13 LED toggle with ~1s delay)

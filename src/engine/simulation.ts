@@ -3,64 +3,53 @@ import { PlacedComponent, Wire } from '../types';
 // Re-export the simulator for backward compat
 export { CircuitSimulator } from './CircuitSimulator';
 
+/** Board pin hole shorthand */
+const bh = (col: number, row: number) => ({ componentId: 'board', pinId: `${col},${row}` });
+
 /**
- * Creates the LED blink demo circuit using a real 555 astable configuration
- * with breadboard internal wiring.
+ * Create rail jumper wires linking adjacent 5-row rail groups.
+ * On a real breadboard, users run a wire along the entire rail.
+ * This connects groups 0-1, 1-2, 2-3, etc. for both + and - rails.
+ */
+function railJumpers(posCol: number, negCol: number, fromGroup: number, toGroup: number, idPrefix: string): Wire[] {
+  const wires: Wire[] = [];
+  for (let g = fromGroup; g < toGroup; g++) {
+    const row1 = g * 5 + 4;       // last row of group g
+    const row2 = (g + 1) * 5;     // first row of group g+1
+    wires.push(
+      { id: `${idPrefix}rj+${g}`, from: bh(posCol, row1), to: bh(posCol, row2), waypoints: [], color: '#ef4444' },
+      { id: `${idPrefix}rj-${g}`, from: bh(negCol, row1), to: bh(negCol, row2), waypoints: [], color: '#60a5fa' },
+    );
+  }
+  return wires;
+}
+
+/**
+ * LED blink demo: 555 astable → resistor → LED
+ * Power distributed via board 0 left rail.
  *
- * 555 Astable circuit:
- *   VCC ──Ra──┬──Rb──┬── THR/TRIG
- *             │      │
- *            DIS    C1
- *             │      │
- *            (555)  GND
+ * Standard 555 astable topology:
+ *   VCC → Ra → nodeA (DIS) → Rb → nodeB (THR=TRIG=Cap+) → Cap → GND
  *
- *   OUT ──R_led── LED ── GND
- *   RST ── VCC
+ * Physical layout (board 0):
+ *   Timer at cols 6-8, rows 5-8.  Pin grid positions:
+ *     Left:  RST(6,5)  OUT(6,6)  TRIG(6,7)  GND(6,8)
+ *     Right: VCC(8,5)  DIS(8,6)  THR(8,7)   CTRL(8,8)
  *
- * Breadboard layout (Board 0):
- *   Left comp: cols 2-6, Gap: col 7, Right comp: cols 8-12
- *   Pins in the same row and same half (left or right) share a strip.
- *
- *   555 Timer: straddles gap, left pins col 6, right pins col 8
- *     Left:  RST(row5) OUT(row6) TRIG(row7) GND(row8)
- *     Right: VCC(row5) DIS(row6) THR(row7)  CTRL(row8)
- *
- *   Ra (10k):   col 10, rows 5-7  — pin A at row 5 (same strip as VCC=col8,row5)
- *   Rb (68k):   col 10, rows 7-9  — pin A at row 7 (same strip as Ra B, THR=col8,row7)
- *   C1 (10μF):  col 4, rows 7-8   — pin + at row 7 (same strip as TRIG=col6,row7)
- *   R_led(220): col 4, rows 10-12 — pin A at row 10 (separate from C1)
- *   LED:        col 4, row 13     — separate row
- *
- * Strips that auto-connect (no wire needed):
- *   Right row 5: VCC(col8) ↔ Ra A(col10)       — power to timing resistor
- *   Right row 7: Ra B(col10) ↔ Rb A(col10) ↔ THR(col8) — DIS/timing junction
- *   Left row 7:  TRIG(col6) ↔ C1+(col4)        — trigger tied to capacitor
- *
- * Wires still needed:
- *   Power+ → board right rail or VCC pin
- *   Power- → board GND
- *   Ra B → DIS (row 7 to row 6 — different rows on right side)
- *   THR → TRIG (right row 7 to left row 7 — across gap)
- *   Rb B → C1+ or TRIG node (row 9 to row 7 — need jumper)
- *   OUT → R_led A (left row 6 to left row 10)
- *   R_led B → LED anode (left row 12 to row 13 — same strip if adjacent)
- *   LED cathode → GND
- *   RST → VCC (across gap, row 5)
- *   C1- → GND
+ *   Ra at col 10, rows 4→6:  pin A right-row 4, pin B right-row 6 (=DIS strip → nodeA)
+ *   Rb at col 11, rows 6→8:  pin A right-row 6 (nodeA),  pin B right-row 8
+ *   Wire Rb-B → THR to form nodeB (right-row 7 + left-row 7 via THR↔TRIG)
+ *   C1 at col 4, rows 7-8:   pos left-row 7 (=TRIG strip → nodeB), neg left-row 8 (=GND strip)
  */
 export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  // Helper: position for vertical 1-wide component (pin A = top, offset 0.5)
-  // pinOffX = 12, pinOffY = 0. Position = (holeX - 12, holeY)
   function vPos(col: number, row: number): { x: number; y: number } {
     return { x: 96 + col * 24, y: row * 17 + 8.5 };
   }
-  // 555 timer position from GND pin (left, offset 0.875 → pinOff = (0, 59.5))
   function timerPos(col: number, gndRow: number): { x: number; y: number } {
-    return { x: 96 + col * 24 + 12, y: gndRow * 17 + 8.5 - 59.5 };
+    return { x: 96 + col * 24 + 12, y: gndRow * 17 + 8.5 - 4 * 17 * 7 / 8 };
   }
 
   const components: PlacedComponent[] = [
-    // Power supply (off-board, in supply area)
     {
       id: 'power1', type: 'power',
       position: { x: 0, y: 85 }, rotation: 0,
@@ -74,24 +63,21 @@ export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires
       properties: {},
       state: { outputHigh: 0 },
     },
-    // Ra (10kΩ): col 10, rows 5-7
-    // Strip auto-connects pin A (row 5) to VCC (col 8, row 5)
+    // Ra (47k): col 10, rows 4→6 — VCC → nodeA (DIS strip, right row 6)
     {
       id: 'ra', type: 'resistor',
-      position: vPos(10, 5), rotation: 0,
-      properties: { resistance: 10000 },
+      position: vPos(10, 4), rotation: 0,
+      properties: { resistance: 47000 },
       state: {},
     },
-    // Rb (68kΩ): col 10, rows 7-9
-    // Strip auto-connects pin A (row 7) to Ra B (col 10, row 7) and THR (col 8, row 7)
+    // Rb (68k): col 11, rows 6→8 — nodeA (right row 6) → right row 8, wired to THR (nodeB)
     {
       id: 'rb', type: 'resistor',
-      position: vPos(10, 7), rotation: 0,
+      position: vPos(11, 6), rotation: 0,
       properties: { resistance: 68000 },
       state: {},
     },
-    // C1 (10μF): col 4, rows 7-8
-    // Strip auto-connects pin + (row 7) to TRIG (col 6, row 7)
+    // C1 (47μF): col 4, rows 7-8 — pos at left row 7 (TRIG strip = nodeB), neg at left row 8 (GND strip)
     {
       id: 'c1', type: 'capacitor',
       position: vPos(4, 7), rotation: 0,
@@ -115,59 +101,60 @@ export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires
   ];
 
   const wires: Wire[] = [
-    // Power + → 555 VCC
-    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    // Power - → 555 GND
-    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: { componentId: 'timer1', pinId: 'gnd' }, waypoints: [], color: '#1e1e1e' },
+    // === Power → left rail (row 5, group 1) ===
+    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
+    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 5), waypoints: [], color: '#60a5fa' },
+
+    // === VCC to 555: + rail → right comp strip row 5 ===
+    { id: 'w3', from: bh(0, 5), to: bh(9, 5), waypoints: [], color: '#ef4444' },
+    // === GND to 555: - rail → left comp strip row 8 (GND pin + C1 neg share this strip) ===
+    { id: 'w4', from: bh(1, 8), to: bh(3, 8), waypoints: [], color: '#60a5fa' },
+
     // RST → VCC (across gap, both row 5)
-    { id: 'w3', from: { componentId: 'timer1', pinId: 'reset' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    // Ra B / Rb A node → DIS (right row 7 → right row 6, different rows — need wire)
-    { id: 'w5', from: { componentId: 'ra', pinId: 'b' }, to: { componentId: 'timer1', pinId: 'dis' }, waypoints: [], color: '#fbbf24' },
-    // THR → TRIG (right row 7 → left row 7, across gap — need wire)
-    { id: 'w8', from: { componentId: 'timer1', pinId: 'thr' }, to: { componentId: 'timer1', pinId: 'trig' }, waypoints: [], color: '#4ade80' },
-    // Rb B (row 9) → THR node (row 7) — jumper wire
+    { id: 'w5', from: { componentId: 'timer1', pinId: 'reset' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
+
+    // === Timing network (correct 555 astable: VCC→Ra→DIS→Rb→THR/TRIG/Cap→GND) ===
+    // Ra top → VCC rail (Ra-A at right row 4 → +rail)
+    { id: 'w6', from: { componentId: 'ra', pinId: 'a' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
+    // Rb bottom → THR (connects nodeA→Rb→nodeB where THR/TRIG/Cap live)
     { id: 'w7', from: { componentId: 'rb', pinId: 'b' }, to: { componentId: 'timer1', pinId: 'thr' }, waypoints: [], color: '#4ade80' },
-    // C1 neg → GND
-    { id: 'w10', from: { componentId: 'c1', pinId: 'neg' }, to: { componentId: 'power1', pinId: 'neg' }, waypoints: [], color: '#1e1e1e' },
-    // OUT → R_led A (left row 6 → left row 10 — different rows, need wire)
-    { id: 'w11', from: { componentId: 'timer1', pinId: 'out' }, to: { componentId: 'rled', pinId: 'a' }, waypoints: [], color: '#fbbf24' },
-    // R_led B (row 12) → LED anode (row 13) — need wire (different rows)
-    { id: 'w12', from: { componentId: 'rled', pinId: 'b' }, to: { componentId: 'led1', pinId: 'anode' }, waypoints: [], color: '#fbbf24' },
-    // LED cathode → GND
-    { id: 'w13', from: { componentId: 'led1', pinId: 'cathode' }, to: { componentId: 'power1', pinId: 'neg' }, waypoints: [], color: '#1e1e1e' },
+    // THR → TRIG (across gap — nodeB spans both comp strips at row 7)
+    { id: 'w8', from: { componentId: 'timer1', pinId: 'thr' }, to: { componentId: 'timer1', pinId: 'trig' }, waypoints: [], color: '#4ade80' },
+    // (Ra-B and Rb-A share right strip row 6 with DIS → nodeA is automatic via breadboard)
+    // (C1 pos shares left strip row 7 with TRIG → nodeB is automatic via breadboard)
+    // (C1 neg shares left strip row 8 with GND → ground is automatic via breadboard)
+
+    // Link rail group 1 (rows 5-9) to group 2 (rows 10-14) for LED GND
+    ...railJumpers(0, 1, 1, 2, 'b0'),
+    // OUT → R_led A
+    { id: 'w10', from: { componentId: 'timer1', pinId: 'out' }, to: { componentId: 'rled', pinId: 'a' }, waypoints: [], color: '#fbbf24' },
+    // R_led B → LED anode
+    { id: 'w11', from: { componentId: 'rled', pinId: 'b' }, to: { componentId: 'led1', pinId: 'anode' }, waypoints: [], color: '#fbbf24' },
+    // LED cathode → GND rail (group 2)
+    { id: 'w12', from: { componentId: 'led1', pinId: 'cathode' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
   ];
 
   return { components, wires };
 }
 
 /**
- * Creates a 7-segment counter demo circuit:
- * 555 astable → CD4026 counter → 7-segment display
+ * 7-segment counter demo: 555 astable → CD4026 → 7-seg display
+ * Power via board 0 left rail, jumpered to board 1 left rail.
  *
- * The 555 generates a ~1Hz clock signal.
- * Each pulse increments the CD4026 which drives the display 0-9.
- *
- * Layout on Board 1 (cols 16-30):
- *   555 Timer: cols 22-24, rows 5-8 (same astable config)
- *   CD4026: cols 22-24, rows 14-21 (8 tall)
- *   7-Seg: cols 22-24, rows 25-29 (5 tall)
- *   Timing components on right comp area of board 1
+ * Same corrected 555 astable topology as blink demo:
+ *   VCC → Ra → nodeA (DIS, right row 6) → Rb → nodeB (THR=TRIG=Cap+) → Cap → GND
  */
 export function createCounterDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  // Board 1 starts at col 16. Left comp: 18-22, gap: 23, right comp: 24-28
   function vPos(col: number, row: number): { x: number; y: number } {
     return { x: 96 + col * 24, y: row * 17 + 8.5 };
   }
   function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
-    // First pin is bottom-left at offset (height-1)/height from top
-    // For left-side pin at max offset, pinOffY = h * maxOffset
     const h = height * 17;
-    const maxOffset = (height * 2 - 1) / (height * 2); // e.g. 15/16 for 8-tall
+    const maxOffset = (height * 2 - 1) / (height * 2);
     return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
   }
 
   const components: PlacedComponent[] = [
-    // Power supply
     {
       id: 'power1', type: 'power',
       position: { x: 0, y: 85 }, rotation: 0,
@@ -177,22 +164,22 @@ export function createCounterDemoCircuit(): { components: PlacedComponent[]; wir
     // 555 Timer: board 0, cols 6-8, rows 5-8
     {
       id: 'timer1', type: 'timer',
-      position: { x: 96 + 6 * 24 + 12, y: 8 * 17 + 8.5 - 4 * 17 * 7/8 },
+      position: { x: 96 + 6 * 24 + 12, y: 8 * 17 + 8.5 - 4 * 17 * 7 / 8 },
       rotation: 0, properties: {}, state: { outputHigh: 0 },
     },
-    // Ra (10kΩ): col 10, rows 5-7
+    // Ra (10k): col 10, rows 4→6 — VCC → nodeA (DIS strip, right row 6)
     {
       id: 'ra', type: 'resistor',
-      position: vPos(10, 5), rotation: 0,
+      position: vPos(10, 4), rotation: 0,
       properties: { resistance: 10000 }, state: {},
     },
-    // Rb (68kΩ): col 10, rows 7-9
+    // Rb (68k): col 11, rows 6→8 — nodeA (right row 6) → right row 8, wired to THR (nodeB)
     {
       id: 'rb', type: 'resistor',
-      position: vPos(10, 7), rotation: 0,
+      position: vPos(11, 6), rotation: 0,
       properties: { resistance: 68000 }, state: {},
     },
-    // C1 (10μF): col 4, rows 7-8
+    // C1 (47μF): col 4, rows 7-8 — pos at left row 7 (TRIG strip = nodeB), neg at left row 8 (GND strip)
     {
       id: 'c1', type: 'capacitor',
       position: vPos(4, 7), rotation: 0,
@@ -213,29 +200,53 @@ export function createCounterDemoCircuit(): { components: PlacedComponent[]; wir
   ];
 
   const wires: Wire[] = [
-    // === 555 Timer power & timing (same as blink demo) ===
-    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: { componentId: 'timer1', pinId: 'gnd' }, waypoints: [], color: '#1e1e1e' },
-    { id: 'w3', from: { componentId: 'timer1', pinId: 'reset' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    { id: 'w5', from: { componentId: 'ra', pinId: 'b' }, to: { componentId: 'timer1', pinId: 'dis' }, waypoints: [], color: '#fbbf24' },
-    { id: 'w8', from: { componentId: 'timer1', pinId: 'thr' }, to: { componentId: 'timer1', pinId: 'trig' }, waypoints: [], color: '#4ade80' },
+    // === Power → board 0 left rail ===
+    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
+    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 5), waypoints: [], color: '#60a5fa' },
+
+    // Link board 0 rail groups so all rows have power
+    ...railJumpers(0, 1, 1, 3, 'b0'),
+
+    // === 555 power via rail ===
+    { id: 'w3', from: bh(0, 5), to: bh(9, 5), waypoints: [], color: '#ef4444' },
+    { id: 'w4', from: bh(1, 8), to: bh(3, 8), waypoints: [], color: '#60a5fa' },
+
+    // === 555 timing (correct astable: VCC→Ra→DIS→Rb→THR/TRIG/Cap→GND) ===
+    { id: 'w5', from: { componentId: 'timer1', pinId: 'reset' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
+    // Ra top → VCC rail
+    { id: 'w6', from: { componentId: 'ra', pinId: 'a' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
+    // Rb bottom → THR (nodeB)
     { id: 'w7', from: { componentId: 'rb', pinId: 'b' }, to: { componentId: 'timer1', pinId: 'thr' }, waypoints: [], color: '#4ade80' },
-    { id: 'w10', from: { componentId: 'c1', pinId: 'neg' }, to: { componentId: 'power1', pinId: 'neg' }, waypoints: [], color: '#1e1e1e' },
+    // THR → TRIG (across gap — nodeB)
+    { id: 'w8', from: { componentId: 'timer1', pinId: 'thr' }, to: { componentId: 'timer1', pinId: 'trig' }, waypoints: [], color: '#4ade80' },
+    // (Ra-B + Rb-A + DIS share right strip row 6 → nodeA automatic)
+    // (C1 pos + TRIG share left strip row 7 → nodeB automatic)
+    // (C1 neg + GND share left strip row 8 → ground automatic)
+
+    // === Bridge board 0 rail → board 1 rail ===
+    // Board 1 left rail: col 16 (+), col 17 (-)
+    { id: 'w15', from: bh(0, 14), to: bh(16, 14), waypoints: [], color: '#ef4444' },
+    { id: 'w16', from: bh(1, 14), to: bh(17, 14), waypoints: [], color: '#60a5fa' },
+
+    // Link board 1 rail groups so CD4026 and 7-seg can reach power
+    ...railJumpers(16, 17, 2, 6, 'b1'),
 
     // === CD4026 power ===
-    { id: 'w20', from: { componentId: 'power1', pinId: 'pos' }, to: { componentId: 'counter1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    { id: 'w21', from: { componentId: 'power1', pinId: 'neg' }, to: { componentId: 'counter1', pinId: 'gnd' }, waypoints: [], color: '#1e1e1e' },
-    // RST → GND (not resetting)
-    { id: 'w22', from: { componentId: 'counter1', pinId: 'rst' }, to: { componentId: 'power1', pinId: 'neg' }, waypoints: [], color: '#1e1e1e' },
-    // INH → GND (not inhibited)
-    { id: 'w23', from: { componentId: 'counter1', pinId: 'inh' }, to: { componentId: 'power1', pinId: 'neg' }, waypoints: [], color: '#1e1e1e' },
-    // EN → VCC (display enabled)
-    { id: 'w24', from: { componentId: 'counter1', pinId: 'en' }, to: { componentId: 'power1', pinId: 'pos' }, waypoints: [], color: '#ef4444' },
+    // VCC: board 1 + rail → right comp strip (where VCC pin sits)
+    { id: 'w20', from: bh(16, 14), to: bh(25, 14), waypoints: [], color: '#ef4444' },
+    // GND: board 1 - rail → left comp strip row 14 (where GND pin at col 22 sits)
+    { id: 'w21', from: bh(17, 14), to: bh(19, 14), waypoints: [], color: '#60a5fa' },
+    // RST (right side, offset 9/16 → row 18) → GND rail
+    { id: 'w22', from: { componentId: 'counter1', pinId: 'rst' }, to: bh(17, 18), waypoints: [], color: '#60a5fa' },
+    // INH (left side, offset 13/16 → row 20) → GND rail
+    { id: 'w23', from: { componentId: 'counter1', pinId: 'inh' }, to: bh(17, 20), waypoints: [], color: '#60a5fa' },
+    // EN (left side, offset 11/16 → row 19) → VCC rail
+    { id: 'w24', from: { componentId: 'counter1', pinId: 'en' }, to: bh(16, 19), waypoints: [], color: '#ef4444' },
 
     // === 555 OUT → CD4026 CLK ===
     { id: 'w30', from: { componentId: 'timer1', pinId: 'out' }, to: { componentId: 'counter1', pinId: 'clk' }, waypoints: [], color: '#fbbf24' },
 
-    // === CD4026 segment outputs → 7-Seg display inputs ===
+    // === CD4026 → 7-Seg ===
     { id: 'w40', from: { componentId: 'counter1', pinId: 'out_a' }, to: { componentId: 'display1', pinId: 'a' }, waypoints: [], color: '#fb923c' },
     { id: 'w41', from: { componentId: 'counter1', pinId: 'out_b' }, to: { componentId: 'display1', pinId: 'b' }, waypoints: [], color: '#fb923c' },
     { id: 'w42', from: { componentId: 'counter1', pinId: 'out_c' }, to: { componentId: 'display1', pinId: 'c' }, waypoints: [], color: '#fb923c' },
@@ -245,8 +256,129 @@ export function createCounterDemoCircuit(): { components: PlacedComponent[]; wir
     { id: 'w46', from: { componentId: 'counter1', pinId: 'out_g' }, to: { componentId: 'display1', pinId: 'g' }, waypoints: [], color: '#fb923c' },
 
     // === 7-Seg power ===
-    { id: 'w50', from: { componentId: 'power1', pinId: 'pos' }, to: { componentId: 'display1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    { id: 'w51', from: { componentId: 'power1', pinId: 'neg' }, to: { componentId: 'display1', pinId: 'gnd' }, waypoints: [], color: '#1e1e1e' },
+    { id: 'w50', from: bh(16, 27), to: bh(25, 27), waypoints: [], color: '#ef4444' },
+    { id: 'w51', from: bh(17, 27), to: bh(19, 27), waypoints: [], color: '#60a5fa' },
+  ];
+
+  return { components, wires };
+}
+
+/**
+ * Hand-assembled AVR machine code for the classic Arduino Blink sketch:
+ *
+ *   void setup() { pinMode(13, OUTPUT); }
+ *   void loop()  { digitalWrite(13, HIGH); delay(1000);
+ *                   digitalWrite(13, LOW);  delay(1000); }
+ *
+ * Assembled for ATmega328P @ 16 MHz.  Sets DDRB bit 5,
+ * then toggles PORTB bit 5 with a ~1 s busy-wait delay loop.
+ *
+ * Program layout (word addresses):
+ *   0x00  RJMP main
+ *   0x01  NOP / 0x02 NOP
+ *   0x03  LDI R16,0xFF / OUT SPL,R16       (init stack)
+ *   0x05  LDI R16,0x08 / OUT SPH,R16
+ *   0x07  SBI DDRB,5                        (PB5 = output)
+ *   0x08  loop: SBI PORTB,5                 (LED on)
+ *   0x09  RCALL delay
+ *   0x0A  CBI PORTB,5                       (LED off)
+ *   0x0B  RCALL delay
+ *   0x0C  RJMP loop
+ *   0x0D  delay: LDI R18,82
+ *   0x0E  outer: LDI R17,0
+ *   0x0F  middle: LDI R16,0
+ *   0x10  inner: DEC R16
+ *   0x11  BRNE inner
+ *   0x12  DEC R17 / 0x13 BRNE middle
+ *   0x14  DEC R18 / 0x15 BRNE outer
+ *   0x16  RET
+ */
+export const AVR_BLINK_HEX = [
+  ':1000000002C0000000000FEF0DBF08E00EBF259AF0',
+  ':100010002D9A03D02D9801D0FBCF22E510E000E00F',
+  ':0E0020000A95F1F71A95D9F72A95C1F70895B8',
+  ':00000001FF',
+].join('\n');
+
+/**
+ * ATmega328P blink demo: Arduino-style LED blink on pin D13 (PB5).
+ * Pre-loaded with hand-assembled AVR machine code (no compilation needed).
+ *
+ * Physical layout (board 0):
+ *   ATmega328P at cols 6-8, rows 7-20 (DIP-28 straddling center gap)
+ *   Pin grid positions (lastRow = 20):
+ *     Left:  RST(6,20) D0(6,19) … VCC(6,14) GND(6,13) … D8(6,7)
+ *     Right: D9(8,20)  D10(8,19) … D13(8,16) AVCC(8,15) AREF(8,14) GND(8,13) … A5(8,7)
+ *
+ *   Resistor (220 Ω) at col 10, rows 16→18:  pin A right-row 16 (=D13 strip)
+ *   LED at col 10, rows 18-19:  anode right-row 18 (=R.b strip), cathode right-row 19
+ */
+export function createAVRBlinkDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
+  function vPos(col: number, row: number): { x: number; y: number } {
+    return { x: 96 + col * 24, y: row * 17 + 8.5 };
+  }
+  function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
+    const h = height * 17;
+    const maxOffset = (height * 2 - 1) / (height * 2);
+    return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
+  }
+
+  const components: PlacedComponent[] = [
+    {
+      id: 'power1', type: 'power',
+      position: { x: 0, y: 200 }, rotation: 0,
+      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+      state: {},
+    },
+    // ATmega328P: cols 6-8, rows 7-20
+    {
+      id: 'avr1', type: 'atmega328',
+      position: chipPos(6, 20, 14), rotation: 0,
+      properties: { clockSpeed: 16000000 },
+      state: {},
+    },
+    // R1 (220 Ω): col 10, rows 16→18 — D13 strip (right row 16) to LED
+    {
+      id: 'r1', type: 'resistor',
+      position: vPos(10, 16), rotation: 0,
+      properties: { resistance: 220 },
+      state: {},
+    },
+    // LED: col 10, row 18 — anode right-row 18, cathode right-row 19
+    {
+      id: 'led1', type: 'led',
+      position: vPos(10, 18), rotation: 0,
+      properties: { forwardVoltage: 2.0, color: 'red' },
+      state: { on: 0 },
+    },
+  ];
+
+  const wires: Wire[] = [
+    // === Power → left rail (group 2, rows 10-14) ===
+    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
+    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
+
+    // === VCC (left strip row 14): + rail → left comp strip ===
+    { id: 'w3', from: bh(0, 14), to: bh(3, 14), waypoints: [], color: '#ef4444' },
+    // === GND (left strip row 13): - rail → left comp strip ===
+    { id: 'w4', from: bh(1, 13), to: bh(3, 13), waypoints: [], color: '#60a5fa' },
+
+    // === AVCC (right strip row 15): + rail → right comp strip ===
+    { id: 'w5', from: bh(0, 15), to: bh(9, 15), waypoints: [], color: '#ef4444' },
+    // === AGND (right strip row 13): - rail → right comp strip ===
+    { id: 'w6', from: bh(1, 13), to: bh(9, 13), waypoints: [], color: '#60a5fa' },
+
+    // === RST → VCC (keep chip out of reset) ===
+    { id: 'w7', from: { componentId: 'avr1', pinId: 'pc6' }, to: { componentId: 'avr1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
+
+    // Rail jumpers: link group 2 (rows 10-14) → group 3 (rows 15-19) for AVCC + LED GND
+    ...railJumpers(0, 1, 2, 3, 'b0'),
+
+    // === LED circuit ===
+    // D13 (right row 16) → R1 A (right row 16): automatic via breadboard strip
+    // R1 B (right row 18) → LED anode (right row 18): automatic via breadboard strip
+    // LED cathode (right row 19) → GND rail
+    { id: 'w10', from: { componentId: 'led1', pinId: 'cathode' }, to: bh(1, 19), waypoints: [], color: '#60a5fa' },
   ];
 
   return { components, wires };
