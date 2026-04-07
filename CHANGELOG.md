@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.9](https://github.com/HansHugli/Electronics/compare/v0.1.8...v0.1.9) (2026-04-07)
+
+
+### Features
+
+* working 5x7 matrix demo, PCB auto-routing, sketch editor polish ([609c837](https://github.com/HansHugli/Electronics/commit/609c837dbdec2d2a8d934111470add10fe7c6a3c))
+
 ## [0.1.8](https://github.com/HansHugli/Electronics/compare/v0.1.7...v0.1.8) (2026-04-07)
 
 
