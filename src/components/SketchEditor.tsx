@@ -43,6 +43,9 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
   const [cliReady, setCliReady] = useState(false);
   const [setupProgress, setSetupProgress] = useState('');
   const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sketchInputRef = useRef<HTMLInputElement | null>(null);
+  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+  const lineNumbersRef = useRef<HTMLDivElement | null>(null);
 
   // Check arduino-cli status on mount
   useEffect(() => {
@@ -138,6 +141,26 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
     }
   };
 
+  const handleLoadSketchFile = () => {
+    sketchInputRef.current?.click();
+  };
+
+  const handleSketchFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    setCode(text);
+    setStatus('idle');
+    setMessage(`Loaded sketch "${file.name}"`);
+    setCompileErrors([]);
+    event.target.value = '';
+  };
+
+  const handleTextareaScroll = () => {
+    if (!lineNumbersRef.current || !textAreaRef.current) return;
+    lineNumbersRef.current.scrollTop = textAreaRef.current.scrollTop;
+  };
+
   const lineCount = code.split('\n').length;
 
   return (
@@ -146,7 +169,7 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
         <h2 className="modal-title">Arduino Sketch Editor</h2>
         <div className="sketch-editor-wrap">
           {/* Line numbers */}
-          <div className="sketch-line-numbers">
+          <div ref={lineNumbersRef} className="sketch-line-numbers">
             {Array.from({ length: lineCount }, (_, i) => (
               <div
                 key={i + 1}
@@ -157,13 +180,22 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
             ))}
           </div>
           <textarea
+            ref={textAreaRef}
             className="sketch-textarea"
             value={code}
             onChange={(e) => { setCode(e.target.value); setCompileErrors([]); }}
+            onScroll={handleTextareaScroll}
             spellCheck={false}
             placeholder="Write your Arduino sketch here..."
           />
         </div>
+        <input
+          ref={sketchInputRef}
+          type="file"
+          accept=".ino"
+          style={{ display: 'none' }}
+          onChange={handleSketchFileChange}
+        />
         {/* Compile errors list */}
         {compileErrors.length > 0 && (
           <div className="sketch-errors">
@@ -200,14 +232,23 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
             </button>
           )}
           {cliReady && (
-            <button
-              type="button"
-              className="modal-btn primary"
-              onClick={handleCompile}
-              disabled={status === 'compiling' || !code.trim()}
-            >
-              {status === 'compiling' ? 'Compiling...' : 'Compile & Load'}
-            </button>
+            <>
+              <button
+                type="button"
+                className="modal-btn primary"
+                onClick={handleCompile}
+                disabled={status === 'compiling' || !code.trim()}
+              >
+                {status === 'compiling' ? 'Compiling...' : 'Compile & Load'}
+              </button>
+              <button
+                type="button"
+                className="modal-btn"
+                onClick={handleLoadSketchFile}
+              >
+                Load .ino
+              </button>
+            </>
           )}
           <button type="button" className="modal-btn" onClick={onClose}>
             Cancel

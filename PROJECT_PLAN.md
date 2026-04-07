@@ -66,6 +66,8 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 - [x] Sub-stepping for simulation accuracy (configurable 1-10x)
 - [x] Pre-LED voltage saving to prevent re-solve corruption
 - [x] Adjustable simulation speed (0.25x to 10x)
+- [x] AVR transition event log + per-tick edge replay for sequential digital chips (74HC595, 74HC74) — lets AVR bit-bang clocks at microsecond rates inside a 100ms simulator tick
+- [x] LED matrix sliding-window aggregation — reconstructs row-multiplexed scans into a steady binary image
 
 ## Phase 3 — Advanced Features (In Progress)
 
@@ -89,6 +91,7 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 - [x] Pin hole coordinate display on hover (with voltage during sim)
 - [x] Breadboard strip highlighting on pin hover
 - [x] Current flow direction arrows on wires during simulation
+- [x] Run-mode chrome: chip part numbers, pin numbers, and pin labels hidden during simulation for a cleaner display
 
 ### App Chrome
 - [x] Electron app menu (File, Edit, View with DevTools, Help)
@@ -101,12 +104,13 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 - [x] LED Blink — 555 astable (Ra=47k, Rb=68k, C=47μF)
 - [x] 7-Seg Counter — 555 astable → CD4026 → 7-segment display
 - [x] AVR Blink — ATmega328P with pre-loaded hand-assembled hex (pin 13 LED)
+- [x] 5x7 Matrix — ATmega328P + 74HC595 driving animated LED matrix patterns
 
 ### Remaining
-- [ ] PCB layout improvements (trace overlap, better auto-placement)
+- [x] PCB auto-layout: cluster connected components together, route traces with collision avoidance
 - [x] Multi-select and group operations
-- [ ] Wire routing refinements
-- [ ] Arduino sketch editor compile workflow polish
+- [x] Wire routing refinements
+- [x] Arduino sketch editor: load .ino files from disk, scrollable editor, synced line numbers
 
 ## Technical Stack
 

@@ -91,6 +91,152 @@ function getFootprintSize(type: string): { w: number; h: number } {
   }
 }
 
+function buildComponentClusters(components: PlacedComponent[], wires: Wire[]): string[][] {
+  const parent = new Map<string, string>();
+  const find = (key: string): string => {
+    if (!parent.has(key)) parent.set(key, key);
+    let cur = parent.get(key)!;
+    while (parent.get(cur) !== cur) {
+      parent.set(cur, parent.get(parent.get(cur)!)!);
+      cur = parent.get(cur)!;
+    }
+    parent.set(key, cur);
+    return cur;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a); const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  components.forEach((comp) => find(comp.id));
+
+  for (const wire of wires) {
+    if (wire.from.componentId !== 'board' && wire.to.componentId !== 'board') {
+      union(wire.from.componentId, wire.to.componentId);
+    }
+  }
+
+  const boardGroups = new Map<string, string[]>();
+  for (const comp of components) {
+    const def = COMPONENT_DEFINITIONS[comp.type];
+    if (!def) continue;
+    for (const pin of def.pins) {
+      const pos = getComponentPinPixel(comp, pin.id);
+      if (!pos) continue;
+      const grid = pixelToBoardGrid(pos.x, pos.y);
+      const groupId = boardPinLookup.get(`${grid.col},${grid.row}`);
+      if (!groupId) continue;
+      if (!boardGroups.has(groupId)) boardGroups.set(groupId, []);
+      boardGroups.get(groupId)!.push(comp.id);
+    }
+  }
+
+  for (const ids of boardGroups.values()) {
+    for (let i = 1; i < ids.length; i++) {
+      union(ids[0], ids[i]);
+    }
+  }
+
+  const clusters = new Map<string, string[]>();
+  for (const comp of components) {
+    const root = find(comp.id);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root)!.push(comp.id);
+  }
+  return Array.from(clusters.values());
+}
+
+function getNetDegree(comp: PlacedComponent, wires: Wire[]): number {
+  return wires.reduce((count, wire) => (
+    count + (wire.from.componentId === comp.id ? 1 : 0) + (wire.to.componentId === comp.id ? 1 : 0)
+  ), 0);
+}
+
+function rectIntersectsSegment(rect: { x: number; y: number; w: number; h: number }, ax: number, ay: number, bx: number, by: number): boolean {
+  const minX = Math.min(ax, bx);
+  const maxX = Math.max(ax, bx);
+  const minY = Math.min(ay, by);
+  const maxY = Math.max(ay, by);
+  if (ax === bx) {
+    return ax > rect.x && ax < rect.x + rect.w && maxY > rect.y && minY < rect.y + rect.h;
+  }
+  if (ay === by) {
+    return ay > rect.y && ay < rect.y + rect.h && maxX > rect.x && minX < rect.x + rect.w;
+  }
+  return false;
+}
+
+function segsOverlap(ax1: number, ay1: number, ax2: number, ay2: number, bx1: number, by1: number, bx2: number, by2: number): boolean {
+  if (ax1 === ax2 && bx1 === bx2 && ax1 === bx1) {
+    const aMin = Math.min(ay1, ay2);
+    const aMax = Math.max(ay1, ay2);
+    const bMin = Math.min(by1, by2);
+    const bMax = Math.max(by1, by2);
+    return aMax > bMin && bMax > aMin;
+  }
+  if (ay1 === ay2 && by1 === by2 && ay1 === by1) {
+    const aMin = Math.min(ax1, ax2);
+    const aMax = Math.max(ax1, ax2);
+    const bMin = Math.min(bx1, bx2);
+    const bMax = Math.max(bx1, bx2);
+    return aMax > bMin && bMax > aMin;
+  }
+  return false;
+}
+
+function pathIsClear(
+  points: { x: number; y: number }[],
+  rects: { x: number; y: number; w: number; h: number }[],
+  occupied: { ax: number; ay: number; bx: number; by: number }[],
+): boolean {
+  for (let i = 0; i < points.length - 1; i++) {
+    const ax = points[i].x;
+    const ay = points[i].y;
+    const bx = points[i + 1].x;
+    const by = points[i + 1].y;
+    for (const rect of rects) {
+      if (rectIntersectsSegment(rect, ax, ay, bx, by)) return false;
+    }
+    for (const seg of occupied) {
+      if (segsOverlap(ax, ay, bx, by, seg.ax, seg.ay, seg.bx, seg.by)) return false;
+    }
+  }
+  return true;
+}
+
+function pointsToPathD(points: { x: number; y: number }[]): string {
+  if (points.length === 0) return '';
+  return points.map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${pt.x} ${pt.y}`).join(' ');
+}
+
+function routeTrace(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  netIdx: number,
+  rects: { x: number; y: number; w: number; h: number }[],
+  occupied: { ax: number; ay: number; bx: number; by: number }[],
+): { path: string; points: { x: number; y: number }[] } {
+  const offset = (netIdx % 3 - 1) * 10;
+  const candidates: { x: number; y: number }[][] = [];
+  const midX = (from.x + to.x) / 2 + offset;
+  const midY = (from.y + to.y) / 2 + offset;
+
+  candidates.push([from, { x: midX, y: from.y }, { x: midX, y: to.y }, to]);
+  candidates.push([from, { x: from.x, y: midY }, { x: to.x, y: midY }, to]);
+  candidates.push([from, { x: from.x, y: to.y }, to]);
+  candidates.push([from, { x: to.x, y: from.y }, to]);
+  candidates.push([from, { x: midX, y: from.y }, { x: midX, y: midY }, { x: to.x, y: midY }, to]);
+  candidates.push([from, { x: from.x, y: midY }, { x: midX, y: midY }, { x: midX, y: to.y }, to]);
+
+  for (const candidate of candidates) {
+    if (pathIsClear(candidate, rects, occupied)) {
+      return { path: pointsToPathD(candidate), points: candidate };
+    }
+  }
+
+  return { path: pointsToPathD([from, { x: from.x, y: to.y }, to ]), points: [from, { x: from.x, y: to.y }, to] };
+}
+
 const BOARD_PAD = 50;
 const COMP_SPACING = 60;
 
@@ -116,47 +262,66 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
     const placeable = components.filter((c) => c.type !== 'power' && c.type !== 'multimeter');
     const layoutItems: LayoutItem[] = [];
 
-    // --- Auto-layout: row-based with generous spacing ---
+    // --- Auto-layout: cluster components by connectivity and place connected groups together ---
+    const clusters = buildComponentClusters(placeable, wires);
+    const sortedClusters = clusters
+      .map((cluster) => cluster
+        .map((id) => placeable.find((comp) => comp.id === id))
+        .filter((comp): comp is PlacedComponent => Boolean(comp)))
+      .sort((a, b) => b.length - a.length);
+
     let curX = BOARD_PAD;
     let curY = BOARD_PAD;
     let rowH = 0;
-    const maxW = 800;
+    const maxW = 900;
+    const PAD_INSET = 4; // keep pads slightly inside body edge
 
-    for (const comp of placeable) {
-      const def = COMPONENT_DEFINITIONS[comp.type];
-      if (!def) continue;
-      const { w, h } = getFootprintSize(comp.type);
-
-      if (curX + w + COMP_SPACING > maxW) {
+    for (const group of sortedClusters) {
+      const sortedGroup = group.sort((a, b) => getNetDegree(b, wires) - getNetDegree(a, wires));
+      if (curX !== BOARD_PAD) {
         curX = BOARD_PAD;
         curY += rowH + COMP_SPACING;
         rowH = 0;
       }
 
-      // Generate pin positions evenly along each side
-      const pins: LayoutItem['pins'] = [];
-      const leftPins = def.pins.filter((p) => p.side === 'left');
-      const rightPins = def.pins.filter((p) => p.side === 'right');
-      const topPins = def.pins.filter((p) => p.side === 'top');
-      const bottomPins = def.pins.filter((p) => p.side === 'bottom');
+      for (const comp of sortedGroup) {
+        const def = COMPONENT_DEFINITIONS[comp.type];
+        if (!def) continue;
+        const { w, h } = getFootprintSize(comp.type);
 
-      const PAD_INSET = 4; // keep pads slightly inside body edge
-      leftPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX - PAD_INSET, y: curY + ((i + 0.5) / Math.max(leftPins.length, 1)) * h });
-      });
-      rightPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX + w + PAD_INSET, y: curY + ((i + 0.5) / Math.max(rightPins.length, 1)) * h });
-      });
-      topPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(topPins.length, 1)) * w, y: curY - PAD_INSET });
-      });
-      bottomPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(bottomPins.length, 1)) * w, y: curY + h + PAD_INSET });
-      });
+        if (curX + w + COMP_SPACING > maxW) {
+          curX = BOARD_PAD;
+          curY += rowH + COMP_SPACING;
+          rowH = 0;
+        }
 
-      layoutItems.push({ comp, ref: getRef(comp), x: curX, y: curY, w, h, pins });
-      curX += w + COMP_SPACING;
-      if (h > rowH) rowH = h;
+        const pins: LayoutItem['pins'] = [];
+        const leftPins = def.pins.filter((p) => p.side === 'left');
+        const rightPins = def.pins.filter((p) => p.side === 'right');
+        const topPins = def.pins.filter((p) => p.side === 'top');
+        const bottomPins = def.pins.filter((p) => p.side === 'bottom');
+
+        leftPins.forEach((p, i) => {
+          pins.push({ id: p.id, label: p.label, x: curX - PAD_INSET, y: curY + ((i + 0.5) / Math.max(leftPins.length, 1)) * h });
+        });
+        rightPins.forEach((p, i) => {
+          pins.push({ id: p.id, label: p.label, x: curX + w + PAD_INSET, y: curY + ((i + 0.5) / Math.max(rightPins.length, 1)) * h });
+        });
+        topPins.forEach((p, i) => {
+          pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(topPins.length, 1)) * w, y: curY - PAD_INSET });
+        });
+        bottomPins.forEach((p, i) => {
+          pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(bottomPins.length, 1)) * w, y: curY + h + PAD_INSET });
+        });
+
+        layoutItems.push({ comp, ref: getRef(comp), x: curX, y: curY, w, h, pins });
+        curX += w + COMP_SPACING;
+        rowH = Math.max(rowH, h);
+      }
+
+      curX = BOARD_PAD;
+      curY += rowH + COMP_SPACING;
+      rowH = 0;
     }
 
     const bw = maxW + BOARD_PAD;
@@ -246,16 +411,23 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
       }
     }
 
+    const layoutRects = layoutItems.map((item) => ({
+      x: item.x - 10,
+      y: item.y - 10,
+      w: item.w + 20,
+      h: item.h + 20,
+    }));
+
     // Use Prim's MST to connect pins within each net (avoids long chain routing)
-    const netTraces: { from: { x: number; y: number }; to: { x: number; y: number }; netIdx: number }[] = [];
+    const netTraces: { path: string; netIdx: number }[] = [];
     let netIdx = 0;
     for (const [, pts] of netGroups) {
       if (pts.length < 2) { netIdx++; continue; }
 
-      // Prim's MST
       const inTree = new Set<number>([0]);
       const remaining = new Set<number>();
       for (let i = 1; i < pts.length; i++) remaining.add(i);
+      const occupiedSegments: { ax: number; ay: number; bx: number; by: number }[] = [];
 
       while (remaining.size > 0) {
         let bestDist = Infinity;
@@ -265,7 +437,7 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
           for (const ti of remaining) {
             const dx = pts[fi].x - pts[ti].x;
             const dy = pts[fi].y - pts[ti].y;
-            const dist = Math.abs(dx) + Math.abs(dy); // Manhattan
+            const dist = Math.abs(dx) + Math.abs(dy);
             if (dist < bestDist) {
               bestDist = dist;
               bestFrom = fi;
@@ -273,9 +445,20 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
             }
           }
         }
+
+        const { path, points } = routeTrace(pts[bestFrom], pts[bestTo], netIdx, layoutRects, occupiedSegments);
+        for (let p = 0; p < points.length - 1; p++) {
+          occupiedSegments.push({
+            ax: points[p].x,
+            ay: points[p].y,
+            bx: points[p + 1].x,
+            by: points[p + 1].y,
+          });
+        }
+
         inTree.add(bestTo);
         remaining.delete(bestTo);
-        netTraces.push({ from: pts[bestFrom], to: pts[bestTo], netIdx });
+        netTraces.push({ path, netIdx });
       }
       netIdx++;
     }
@@ -307,12 +490,10 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
             {/* Traces — rendered behind components */}
             {nets.map((net, i) => {
               const color = NET_COLORS[net.netIdx % NET_COLORS.length];
-              // Route: horizontal from source, vertical, horizontal to dest (Z-shape)
-              const midX = (net.from.x + net.to.x) / 2;
               return (
                 <path
                   key={`trace-${i}`}
-                  d={`M ${net.from.x} ${net.from.y} L ${midX} ${net.from.y} L ${midX} ${net.to.y} L ${net.to.x} ${net.to.y}`}
+                  d={net.path}
                   stroke={color}
                   strokeWidth={2.5}
                   fill="none"

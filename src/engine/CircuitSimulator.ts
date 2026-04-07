@@ -76,8 +76,9 @@ interface PersistentState {
   gateOutputs: Map<string, Record<string, boolean>>; // componentId -> { '1y': true, '2y': false, ... }
   opampOut: Map<string, number>;           // componentId -> previous output voltage
   ledMatrix: Map<string, boolean[]>;       // componentId -> 35 booleans (col-major: C1R1..C1R7, C2R1..C2R7, ...)
+  ledMatrixHistory: Map<string, boolean[][]>; // componentId -> ring buffer of recent per-tick LED states (sliding-window OR)
   avrBridges: Map<string, AVRBridge>;     // componentId -> AVR bridge instance
-  shiftReg: Map<string, { bits: number; output: number; prevSrclk: boolean; prevRclk: boolean }>; // 74HC595
+  shiftReg: Map<string, { bits: number; output: number; prevSrclk: boolean; prevRclk: boolean; prevSer: boolean; prevSrclr: boolean }>; // 74HC595
   flipflop: Map<string, { q1: boolean; q2: boolean; prevClk1: boolean; prevClk2: boolean }>;      // 74HC74
 }
 
@@ -89,6 +90,7 @@ export class CircuitSimulator {
     gateOutputs: new Map(),
     opampOut: new Map(),
     ledMatrix: new Map(),
+    ledMatrixHistory: new Map(),
     avrBridges: new Map(),
     shiftReg: new Map(),
     flipflop: new Map(),
@@ -101,6 +103,7 @@ export class CircuitSimulator {
     this.state.gateOutputs.clear();
     this.state.opampOut.clear();
     this.state.ledMatrix.clear();
+    this.state.ledMatrixHistory.clear();
     this.state.shiftReg.clear();
     this.state.flipflop.clear();
     for (const bridge of this.state.avrBridges.values()) bridge.reset();
@@ -331,6 +334,204 @@ export class CircuitSimulator {
     }
 
     const N = nextNodeId - 1; // number of non-ground nodes
+
+    // === Step 2.5: AVR pre-pass ===
+    // Run all AVR CPUs first so we have:
+    //   (a) the final pin states needed for stamping,
+    //   (b) the per-tick transition log needed for sequential digital replay.
+    // Then update AVR-driven sequential components (shift registers, D flip-
+    // flops) BEFORE the MNA matrix is stamped, so the column/output values
+    // they drive are consistent with the AVR row pins in the same solve.
+    const avrGpioPins = [
+      'pd0','pd1','pd2','pd3','pd4','pd5','pd6','pd7',
+      'pb0','pb1','pb2','pb3','pb4','pb5',
+      'pc0','pc1','pc2','pc3','pc4','pc5',
+    ];
+    interface AvrDriver { avrId: string; pinId: string; bridge: AVRBridge }
+    const nodeToAvrDriver = new Map<number, AvrDriver>();
+    const avrFinalPins = new Map<string, Map<string, string>>(); // avrId -> pinId -> state
+    for (const comp of components) {
+      if (comp.type !== 'atmega328') continue;
+      const bridge = this.state.avrBridges.get(comp.id);
+      if (!bridge?.isLoaded()) continue;
+      const result = bridge.tick(dt);
+      avrFinalPins.set(comp.id, result.pins as Map<string, string>);
+      for (const pinId of avrGpioPins) {
+        const node = getNode(comp.id, pinId);
+        nodeToAvrDriver.set(node, { avrId: comp.id, pinId, bridge });
+      }
+    }
+
+    // Helper used by both shift-register and flip-flop pre-pass to walk an
+    // AVR's per-tick transition log and apply edge logic at each event.
+    const collectAvrTransitions = (
+      drv: AvrDriver | undefined,
+      which: string,
+    ): { cycle: number; which: string; high: boolean }[] => {
+      if (!drv) return [];
+      const out: { cycle: number; which: string; high: boolean }[] = [];
+      for (const t of drv.bridge.transitions) {
+        if (t.pinId === drv.pinId) out.push({ cycle: t.cycle, which, high: t.high });
+      }
+      return out;
+    };
+
+    // 74HC595 pre-pass: replay AVR-sourced edges so sr.output is current
+    // BEFORE we stamp it into the MNA matrix below. Shift registers without
+    // any AVR driver fall through and are handled in the post-solve update,
+    // which uses analog snapshot voltages.
+    const shiftRegHandledEarly = new Set<string>();
+    for (const comp of components) {
+      if (comp.type !== 'shift_register') continue;
+      const srclkNode = getNode(comp.id, 'srclk');
+      const rclkNode = getNode(comp.id, 'rclk');
+      const serNode = getNode(comp.id, 'ser');
+      const srclrNode = getNode(comp.id, 'srclr');
+      const oeNode = getNode(comp.id, 'oe');
+      const srclkDrv = nodeToAvrDriver.get(srclkNode);
+      const rclkDrv = nodeToAvrDriver.get(rclkNode);
+      const serDrv = nodeToAvrDriver.get(serNode);
+      const srclrDrv = nodeToAvrDriver.get(srclrNode);
+      const oeDrv = nodeToAvrDriver.get(oeNode);
+      // If no clock input is AVR-driven, leave for the post-solve path.
+      if (!srclkDrv && !rclkDrv && !srclrDrv) continue;
+
+      if (!this.state.shiftReg.has(comp.id)) {
+        this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false, prevSer: false, prevSrclr: true });
+      }
+      const sr = this.state.shiftReg.get(comp.id)!;
+
+      // Build merged event stream
+      const events = [
+        ...collectAvrTransitions(srclkDrv, 'srclk'),
+        ...collectAvrTransitions(rclkDrv, 'rclk'),
+        ...collectAvrTransitions(serDrv, 'ser'),
+        ...collectAvrTransitions(srclrDrv, 'srclr'),
+      ].sort((a, b) => a.cycle - b.cycle);
+
+      let curSrclk = sr.prevSrclk;
+      let curRclk = sr.prevRclk;
+      let curSer = sr.prevSer;
+      let curSrclr = sr.prevSrclr;
+      // OE is rarely toggled mid-tick — sample its final AVR state if AVR-
+      // driven, otherwise assume enabled (the post-solve fallback handles
+      // non-AVR OE properly).
+      const oeFinalState = oeDrv ? avrFinalPins.get(oeDrv.avrId)?.get(oeDrv.pinId) : undefined;
+      const curOe = oeFinalState === 'high';
+
+      const apply = (next: { srclk: boolean; rclk: boolean; ser: boolean; srclr: boolean }) => {
+        if (!next.srclr) {
+          sr.bits = 0;
+        } else if (next.srclk && !curSrclk) {
+          sr.bits = ((sr.bits << 1) | (next.ser ? 1 : 0)) & 0xFF;
+        }
+        if (next.rclk && !curRclk) {
+          sr.output = curOe ? 0 : sr.bits;
+        }
+        curSrclk = next.srclk;
+        curRclk = next.rclk;
+        curSer = next.ser;
+        curSrclr = next.srclr;
+      };
+
+      for (const ev of events) {
+        const next = { srclk: curSrclk, rclk: curRclk, ser: curSer, srclr: curSrclr };
+        (next as Record<string, boolean>)[ev.which] = ev.high;
+        apply(next);
+      }
+
+      // Settle to final AVR-driven levels (non-AVR pins keep their cur values)
+      const finalState = (drv: AvrDriver | undefined, fallback: boolean) => {
+        if (!drv) return fallback;
+        return avrFinalPins.get(drv.avrId)?.get(drv.pinId) === 'high';
+      };
+      const settled = {
+        srclk: finalState(srclkDrv, curSrclk),
+        rclk: finalState(rclkDrv, curRclk),
+        ser: finalState(serDrv, curSer),
+        srclr: srclrDrv ? finalState(srclrDrv, curSrclr) : true, // assume tied high if not AVR-driven
+      };
+      apply(settled);
+
+      sr.prevSrclk = settled.srclk;
+      sr.prevRclk = settled.rclk;
+      sr.prevSer = settled.ser;
+      sr.prevSrclr = settled.srclr;
+      shiftRegHandledEarly.add(comp.id);
+    }
+
+    // 74HC74 pre-pass: same idea for AVR-driven D flip-flops.
+    const flipflopHandledEarly = new Set<string>();
+    for (const comp of components) {
+      if (comp.type !== 'flipflop_d') continue;
+      let anyAvrDriver = false;
+      for (const n of ['1', '2'] as const) {
+        if (
+          nodeToAvrDriver.get(getNode(comp.id, `${n}clk`)) ||
+          nodeToAvrDriver.get(getNode(comp.id, `${n}pre`)) ||
+          nodeToAvrDriver.get(getNode(comp.id, `${n}clr`))
+        ) {
+          anyAvrDriver = true;
+          break;
+        }
+      }
+      if (!anyAvrDriver) continue;
+      if (!this.state.flipflop.has(comp.id)) {
+        this.state.flipflop.set(comp.id, { q1: false, q2: false, prevClk1: false, prevClk2: false });
+      }
+      const ff = this.state.flipflop.get(comp.id)!;
+
+      for (const n of ['1', '2'] as const) {
+        const clkDrv = nodeToAvrDriver.get(getNode(comp.id, `${n}clk`));
+        const dDrv = nodeToAvrDriver.get(getNode(comp.id, `${n}d`));
+        const preDrv = nodeToAvrDriver.get(getNode(comp.id, `${n}pre`));
+        const clrDrv = nodeToAvrDriver.get(getNode(comp.id, `${n}clr`));
+
+        const events = [
+          ...collectAvrTransitions(clkDrv, 'clk'),
+          ...collectAvrTransitions(dDrv, 'd'),
+          ...collectAvrTransitions(preDrv, 'pre'),
+          ...collectAvrTransitions(clrDrv, 'clr'),
+        ].sort((a, b) => a.cycle - b.cycle);
+
+        const finalState = (drv: AvrDriver | undefined, fallback: boolean) => {
+          if (!drv) return fallback;
+          return avrFinalPins.get(drv.avrId)?.get(drv.pinId) === 'high';
+        };
+
+        let curClk = n === '1' ? ff.prevClk1 : ff.prevClk2;
+        let curD = finalState(dDrv, true);
+        let curPre = finalState(preDrv, true);
+        let curClr = finalState(clrDrv, true);
+        let q = n === '1' ? ff.q1 : ff.q2;
+
+        const step = (next: { clk: boolean; d: boolean; pre: boolean; clr: boolean }) => {
+          if (!next.clr) q = false;
+          else if (!next.pre) q = true;
+          else if (next.clk && !curClk) q = next.d;
+          curClk = next.clk;
+          curD = next.d;
+          curPre = next.pre;
+          curClr = next.clr;
+        };
+
+        for (const ev of events) {
+          const next = { clk: curClk, d: curD, pre: curPre, clr: curClr };
+          (next as Record<string, boolean>)[ev.which] = ev.high;
+          step(next);
+        }
+        step({
+          clk: finalState(clkDrv, curClk),
+          d: finalState(dDrv, curD),
+          pre: finalState(preDrv, curPre),
+          clr: finalState(clrDrv, curClr),
+        });
+
+        if (n === '1') { ff.q1 = q; ff.prevClk1 = curClk; }
+        else { ff.q2 = q; ff.prevClk2 = curClk; }
+      }
+      flipflopHandledEarly.add(comp.id);
+    }
 
     // === Step 3: Count voltage sources ===
     let numVSources = 0;
@@ -692,7 +893,7 @@ export class CircuitSimulator {
       if (comp.type === 'shift_register') {
         const nodeVcc = getNode(comp.id, 'vcc');
         if (!this.state.shiftReg.has(comp.id)) {
-          this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false });
+          this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false, prevSer: false, prevSrclr: true });
         }
         const sr = this.state.shiftReg.get(comp.id)!;
         const outputPins = ['qa', 'qb', 'qc', 'qd', 'qe', 'qf', 'qg', 'qh'];
@@ -736,16 +937,13 @@ export class CircuitSimulator {
       }
     }
 
-    // --- ATmega328: run AVR CPU and stamp output pins ---
-    const avrGpioPins = [
-      'pd0','pd1','pd2','pd3','pd4','pd5','pd6','pd7',
-      'pb0','pb1','pb2','pb3','pb4','pb5',
-      'pc0','pc1','pc2','pc3','pc4','pc5',
-    ];
+    // --- ATmega328: stamp GPIO pins from the pre-pass (Step 2.5) results ---
+    // The CPUs were already run there so the per-tick transition log was
+    // available for sequential digital components to replay before stamping.
     for (const comp of components) {
       if (comp.type === 'atmega328') {
-        const bridge = this.state.avrBridges.get(comp.id);
-        if (!bridge?.isLoaded()) {
+        const finalPins = avrFinalPins.get(comp.id);
+        if (!finalPins) {
           // No program loaded — all GPIO pins are high-impedance
           for (const pinId of avrGpioPins) {
             const node = getNode(comp.id, pinId);
@@ -754,28 +952,19 @@ export class CircuitSimulator {
           continue;
         }
 
-        // Run AVR CPU for this tick
-        const avrResult = bridge.tick(dt);
-
-        // Get VCC node for this chip
         const nodeVcc = getNode(comp.id, 'vcc');
 
-        // Stamp each GPIO pin based on AVR output state
         for (const pinId of avrGpioPins) {
           const node = getNode(comp.id, pinId);
-          const pinState = avrResult.pins.get(pinId);
+          const pinState = finalPins.get(pinId);
 
           if (pinState === 'high') {
-            // Output HIGH: low impedance to VCC
-            stampConductance(G, node, nodeVcc, 1 / 40); // ~40 ohm output impedance
+            stampConductance(G, node, nodeVcc, 1 / 40); // ~40Ω output impedance
           } else if (pinState === 'low') {
-            // Output LOW: low impedance to GND
             stampConductance(G, node, 0, 1 / 40);
           } else if (pinState === 'input_pullup') {
-            // Input with pull-up: ~20k to VCC
             stampConductance(G, node, nodeVcc, 1 / 20000);
           } else {
-            // Input (high impedance)
             stampConductance(G, node, 0, 1e-9);
           }
         }
@@ -1082,17 +1271,46 @@ export class CircuitSimulator {
       if (comp.type === 'ledmatrix') {
         const leds: boolean[] = new Array(35).fill(false);
         const state = results.get(comp.id) ?? {};
+
+        // Sample which LEDs are physically conducting this tick.
         for (let c = 0; c < 5; c++) {
           const vCol = nodeVoltage(getNode(comp.id, `c${c + 1}`));
           for (let r = 0; r < 7; r++) {
             const vRow = nodeVoltage(getNode(comp.id, `r${r + 1}`));
-            const vAcross = vCol - vRow;
-            const isOn = vAcross > 1.5; // forward voltage threshold
+            const isOn = (vCol - vRow) > 1.5; // forward voltage threshold
             leds[c * 7 + r] = isOn;
-            state[`led_${c}_${r}`] = isOn ? 1 : 0;
           }
         }
         this.state.ledMatrix.set(comp.id, leds);
+
+        // Sliding-window OR: a multiplexed matrix only ever lights one row at
+        // a time, so any single tick captures only ~1/7 of the picture. We
+        // remember the last WINDOW_TICKS frames and OR them together to
+        // reconstruct the full pattern as a clean binary image. The window
+        // length is set to slightly more than one full firmware scan cycle
+        // (~11 ticks for the matrix demo) so a stable pattern lights every
+        // pixel it should. When the firmware switches patterns, the old one
+        // fully drains out of the window after WINDOW_TICKS and the new one
+        // takes over with no fade.
+        const WINDOW_TICKS = 14;
+        let history = this.state.ledMatrixHistory.get(comp.id);
+        if (!history) {
+          history = [];
+          this.state.ledMatrixHistory.set(comp.id, history);
+        }
+        history.push(leds.slice());
+        while (history.length > WINDOW_TICKS) history.shift();
+
+        for (let c = 0; c < 5; c++) {
+          for (let r = 0; r < 7; r++) {
+            const idx = c * 7 + r;
+            let on = false;
+            for (const frame of history) {
+              if (frame[idx]) { on = true; break; }
+            }
+            state[`led_${c}_${r}`] = on ? 1 : 0;
+          }
+        }
         results.set(comp.id, state);
       }
     }
@@ -1120,31 +1338,115 @@ export class CircuitSimulator {
     }
 
     // 74HC595 Shift Register: update shift/latch on clock edges
+    //
+    // For inputs driven by an AVR, we replay the AVR's per-tick transition log
+    // in cycle order so the shift register sees every edge that happened inside
+    // the simulator tick — not just the final pin state. This is critical when
+    // the AVR is bit-banging the shift register at microsecond timescales while
+    // the outer simulator runs at 100ms ticks.
     for (const comp of components) {
       if (comp.type === 'shift_register') {
+        // Skip components already processed in the pre-pass (those driven by
+        // an AVR), to avoid double-updating their state.
+        if (shiftRegHandledEarly.has(comp.id)) {
+          const sr = this.state.shiftReg.get(comp.id)!;
+          const state = results.get(comp.id) ?? {};
+          state.shiftBits = sr.bits;
+          state.outputBits = sr.output;
+          results.set(comp.id, state);
+          continue;
+        }
         const sr = this.state.shiftReg.get(comp.id)!;
         const vVcc = nodeVoltage(getNode(comp.id, 'vcc'));
         const threshold = vVcc * 0.5;
-        const srclk = nodeVoltage(getNode(comp.id, 'srclk')) > threshold;
-        const rclk = nodeVoltage(getNode(comp.id, 'rclk')) > threshold;
-        const ser = nodeVoltage(getNode(comp.id, 'ser')) > threshold;
-        const srclr = nodeVoltage(getNode(comp.id, 'srclr')) > threshold; // active low
-        const oe = nodeVoltage(getNode(comp.id, 'oe')) > threshold; // active low
 
-        // SRCLR is active low — if LOW, clear shift register
-        if (!srclr) {
-          sr.bits = 0;
+        const srclkNode = getNode(comp.id, 'srclk');
+        const rclkNode = getNode(comp.id, 'rclk');
+        const serNode = getNode(comp.id, 'ser');
+        const srclrNode = getNode(comp.id, 'srclr');
+        const oeNode = getNode(comp.id, 'oe');
+
+        // Final analog snapshot values (used as fallback when no AVR drives the node)
+        const finalSrclk = nodeVoltage(srclkNode) > threshold;
+        const finalRclk = nodeVoltage(rclkNode) > threshold;
+        const finalSer = nodeVoltage(serNode) > threshold;
+        const finalSrclr = nodeVoltage(srclrNode) > threshold; // active low
+        const finalOe = nodeVoltage(oeNode) > threshold; // active low
+
+        // For each control node, find the AVR pin that drives it (if any).
+        const srclkDrv = nodeToAvrDriver.get(srclkNode);
+        const rclkDrv = nodeToAvrDriver.get(rclkNode);
+        const serDrv = nodeToAvrDriver.get(serNode);
+        const srclrDrv = nodeToAvrDriver.get(srclrNode);
+
+        // Build a merged, cycle-ordered event stream of relevant transitions
+        // from every AVR that drives a control input on this shift register.
+        type Evt = { cycle: number; which: 'srclk' | 'rclk' | 'ser' | 'srclr'; high: boolean };
+        const events: Evt[] = [];
+        const collect = (drv: AvrDriver | undefined, which: Evt['which']) => {
+          if (!drv) return;
+          for (const t of drv.bridge.transitions) {
+            if (t.pinId === drv.pinId) events.push({ cycle: t.cycle, which, high: t.high });
+          }
+        };
+        collect(srclkDrv, 'srclk');
+        collect(rclkDrv, 'rclk');
+        collect(serDrv, 'ser');
+        collect(srclrDrv, 'srclr');
+        events.sort((a, b) => a.cycle - b.cycle);
+
+        // Running state — initialised from previous tick's level so the first
+        // edge in the new tick is detected correctly. SER/SRCLR are not edge-
+        // triggered, but we still track their current value so the SRCLK rising
+        // edge samples the right SER and so SRCLR-low can clear at any cycle.
+        let curSrclk = sr.prevSrclk;
+        let curRclk = sr.prevRclk;
+        let curSer = sr.prevSer;
+        let curSrclr = sr.prevSrclr;
+        // OE is rarely AVR-driven and isn't edge-sensitive — use the final value.
+        const curOe = finalOe;
+
+        // Helper to apply edge logic at the current state
+        const applyEdge = (next: { srclk: boolean; rclk: boolean; ser: boolean; srclr: boolean }) => {
+          // SRCLR is active low — clearing latches immediately whenever low
+          if (!next.srclr) {
+            sr.bits = 0;
+          } else if (next.srclk && !curSrclk) {
+            // Rising edge of SRCLK: shift in current SER bit (LSB-first per
+            // 74HC595 datasheet — bit shifts into Q0/QA, others propagate up)
+            sr.bits = ((sr.bits << 1) | (next.ser ? 1 : 0)) & 0xFF;
+          }
+          if (next.rclk && !curRclk) {
+            sr.output = curOe ? 0 : sr.bits;
+          }
+          curSrclk = next.srclk;
+          curRclk = next.rclk;
+          curSer = next.ser;
+          curSrclr = next.srclr;
+        };
+
+        // Replay every AVR-sourced transition in cycle order
+        for (const ev of events) {
+          const next = { srclk: curSrclk, rclk: curRclk, ser: curSer, srclr: curSrclr };
+          next[ev.which] = ev.high;
+          applyEdge(next);
         }
-        // Rising edge of SRCLK: shift in SER bit
-        else if (srclk && !sr.prevSrclk) {
-          sr.bits = ((sr.bits << 1) | (ser ? 1 : 0)) & 0xFF;
-        }
-        // Rising edge of RCLK: latch shift register to output
-        if (rclk && !sr.prevRclk) {
-          sr.output = oe ? 0 : sr.bits; // OE active low — if HIGH, outputs disabled
-        }
-        sr.prevSrclk = srclk;
-        sr.prevRclk = rclk;
+
+        // After replaying, settle on the final analog snapshot for any nodes
+        // that aren't AVR-driven (so non-AVR shift register sources still work).
+        const settled = {
+          srclk: srclkDrv ? curSrclk : finalSrclk,
+          rclk: rclkDrv ? curRclk : finalRclk,
+          ser: serDrv ? curSer : finalSer,
+          srclr: srclrDrv ? curSrclr : finalSrclr,
+        };
+        applyEdge(settled);
+
+        // Persist final levels for next tick's edge detection
+        sr.prevSrclk = settled.srclk;
+        sr.prevRclk = settled.rclk;
+        sr.prevSer = settled.ser;
+        sr.prevSrclr = settled.srclr;
 
         const state = results.get(comp.id) ?? {};
         state.shiftBits = sr.bits;
@@ -1154,32 +1456,91 @@ export class CircuitSimulator {
     }
 
     // 74HC74 D Flip-Flop: update on clock edges
+    //
+    // As with the shift register, we replay AVR transitions on CLK/D/PRE/CLR
+    // in cycle order so AVR-driven flip-flops see every edge inside the tick.
     for (const comp of components) {
       if (comp.type === 'flipflop_d') {
+        if (flipflopHandledEarly.has(comp.id)) {
+          const ff = this.state.flipflop.get(comp.id)!;
+          const state = results.get(comp.id) ?? {};
+          state['1q'] = ff.q1 ? 1 : 0;
+          state['2q'] = ff.q2 ? 1 : 0;
+          results.set(comp.id, state);
+          continue;
+        }
         const ff = this.state.flipflop.get(comp.id)!;
         const vVcc = nodeVoltage(getNode(comp.id, 'vcc'));
         const threshold = vVcc * 0.5;
 
         for (const n of ['1', '2'] as const) {
-          const clk = nodeVoltage(getNode(comp.id, `${n}clk`)) > threshold;
-          const d = nodeVoltage(getNode(comp.id, `${n}d`)) > threshold;
-          const pre = nodeVoltage(getNode(comp.id, `${n}pre`)) > threshold; // active low
-          const clr = nodeVoltage(getNode(comp.id, `${n}clr`)) > threshold; // active low
-          const prevClk = n === '1' ? ff.prevClk1 : ff.prevClk2;
+          const clkNode = getNode(comp.id, `${n}clk`);
+          const dNode = getNode(comp.id, `${n}d`);
+          const preNode = getNode(comp.id, `${n}pre`);
+          const clrNode = getNode(comp.id, `${n}clr`);
 
+          const finalClk = nodeVoltage(clkNode) > threshold;
+          const finalD = nodeVoltage(dNode) > threshold;
+          const finalPre = nodeVoltage(preNode) > threshold;
+          const finalClr = nodeVoltage(clrNode) > threshold;
+
+          const clkDrv = nodeToAvrDriver.get(clkNode);
+          const dDrv = nodeToAvrDriver.get(dNode);
+          const preDrv = nodeToAvrDriver.get(preNode);
+          const clrDrv = nodeToAvrDriver.get(clrNode);
+
+          type FfEvt = { cycle: number; which: 'clk' | 'd' | 'pre' | 'clr'; high: boolean };
+          const events: FfEvt[] = [];
+          const collect = (drv: AvrDriver | undefined, which: FfEvt['which']) => {
+            if (!drv) return;
+            for (const t of drv.bridge.transitions) {
+              if (t.pinId === drv.pinId) events.push({ cycle: t.cycle, which, high: t.high });
+            }
+          };
+          collect(clkDrv, 'clk');
+          collect(dDrv, 'd');
+          collect(preDrv, 'pre');
+          collect(clrDrv, 'clr');
+          events.sort((a, b) => a.cycle - b.cycle);
+
+          let curClk = n === '1' ? ff.prevClk1 : ff.prevClk2;
+          // D/PRE/CLR aren't tracked across ticks today; seed from final analog
+          // value (good enough — D and async controls are level-sensitive only).
+          let curD = finalD;
+          let curPre = finalPre;
+          let curClr = finalClr;
           let q = n === '1' ? ff.q1 : ff.q2;
-          // PRE and CLR are active low
-          if (!clr) {
-            q = false;
-          } else if (!pre) {
-            q = true;
-          } else if (clk && !prevClk) {
-            // Rising edge: capture D
-            q = d;
+
+          const step = (next: { clk: boolean; d: boolean; pre: boolean; clr: boolean }) => {
+            if (!next.clr) {
+              q = false;
+            } else if (!next.pre) {
+              q = true;
+            } else if (next.clk && !curClk) {
+              q = next.d;
+            }
+            curClk = next.clk;
+            curD = next.d;
+            curPre = next.pre;
+            curClr = next.clr;
+          };
+
+          for (const ev of events) {
+            const next = { clk: curClk, d: curD, pre: curPre, clr: curClr };
+            next[ev.which] = ev.high;
+            step(next);
           }
 
-          if (n === '1') { ff.q1 = q; ff.prevClk1 = clk; }
-          else { ff.q2 = q; ff.prevClk2 = clk; }
+          // Settle on final analog snapshot for non-AVR-driven nodes
+          step({
+            clk: clkDrv ? curClk : finalClk,
+            d: dDrv ? curD : finalD,
+            pre: preDrv ? curPre : finalPre,
+            clr: clrDrv ? curClr : finalClr,
+          });
+
+          if (n === '1') { ff.q1 = q; ff.prevClk1 = curClk; }
+          else { ff.q2 = q; ff.prevClk2 = curClk; }
         }
 
         const state = results.get(comp.id) ?? {};

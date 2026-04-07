@@ -48,6 +48,10 @@ export default function Toolbar({
           <span className="toolbar-btn-icon">Av</span>
           <span className="toolbar-btn-label">AVR Blink</span>
         </button>
+        <button type="button" className="toolbar-btn" onClick={() => onLoadDemo('matrix')} title="5x7 LED Matrix Demo">
+          <span className="toolbar-btn-icon">███</span>
+          <span className="toolbar-btn-label">Matrix</span>
+        </button>
         <div className="toolbar-separator" />
         <button type="button" className="toolbar-btn" onClick={onShowPCB} title="PCB layout preview">
           <span className="toolbar-btn-icon">PCB</span>

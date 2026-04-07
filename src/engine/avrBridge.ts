@@ -130,6 +130,17 @@ export class AVRBridge {
   /** I2C transaction log: { addr, data, write } */
   i2cLog: { addr: number; data: number[]; write: boolean }[] = [];
 
+  /** Per-pin transition counts during the most recent tick (debug). */
+  transitionCounts = new Map<string, number>();
+  /**
+   * Ordered transition log for the most recent tick. Each entry records the
+   * AVR cycle at which a pin changed and its new logical level. Sequential
+   * digital components (shift registers, flip-flops) replay this log so they
+   * see every edge that happened *inside* the tick, not just the final state.
+   */
+  transitions: { cycle: number; pinId: string; high: boolean }[] = [];
+  private prevPortValues: Record<'B' | 'C' | 'D', number> = { B: 0, C: 0, D: 0 };
+
   /** Load a hex program and initialize the CPU + peripherals. */
   load(hexString: string, clockFreq?: number): void {
     if (clockFreq) this.clockFreq = clockFreq;
@@ -140,6 +151,28 @@ export class AVRBridge {
     this.portB = new AVRIOPort(this.cpu, portBConfig);
     this.portC = new AVRIOPort(this.cpu, portCConfig);
     this.portD = new AVRIOPort(this.cpu, portDConfig);
+
+    // Listen for port value changes to record per-tick pin transitions.
+    const installListener = (portObj: AVRIOPort, portName: 'B' | 'C' | 'D') => {
+      portObj.addListener((value: number) => {
+        const prev = this.prevPortValues[portName];
+        const changed = value ^ prev;
+        if (changed !== 0) {
+          const cycle = this.cpu ? this.cpu.cycles : 0;
+          for (let bit = 0; bit < 8; bit++) {
+            if ((changed >> bit) & 1) {
+              const pinId = `p${portName.toLowerCase()}${bit}`;
+              this.transitionCounts.set(pinId, (this.transitionCounts.get(pinId) ?? 0) + 1);
+              this.transitions.push({ cycle, pinId, high: ((value >> bit) & 1) === 1 });
+            }
+          }
+          this.prevPortValues[portName] = value;
+        }
+      });
+    };
+    installListener(this.portB, 'B');
+    installListener(this.portC, 'C');
+    installListener(this.portD, 'D');
 
     // Timers
     this.timer0 = new AVRTimer(this.cpu, timer0Config);
@@ -242,6 +275,10 @@ export class AVRBridge {
    */
   tick(dt: number): AVRPinStates {
     if (!this.cpu) return { pins: this.pinStates };
+
+    // Reset per-tick transition counters and event log
+    this.transitionCounts.clear();
+    this.transitions.length = 0;
 
     const cyclesToRun = Math.round(this.clockFreq * dt);
     const targetCycles = this.cpu.cycles + cyclesToRun;

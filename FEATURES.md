@@ -102,6 +102,10 @@ Hover any pin hole to see its connected strip highlighted in yellow.
 5. LEDs glow, 7-segment displays update, counters count
 6. Click **Stop** to reset
 
+### Run-Mode Display
+
+When the simulation is running, chip part numbers, pin numbers, and pin labels are hidden across the breadboard so the visual focus is on the live state of LEDs, displays, and indicators. Stop the simulation to bring the labels back for editing.
+
 ### Oscilloscope
 
 1. Select a component and click **Probe** in the properties panel
@@ -144,6 +148,10 @@ In Arduino IDE:
 - GPIO (digital read/write)
 - Timer0, Timer1, Timer2 (delay, millis, PWM)
 - Input pull-up resistors
+
+### Driving sequential digital chips at high speeds
+
+When the AVR bit-bangs a sequential digital chip such as the 74HC595 shift register or 74HC74 D flip-flop, the simulator captures every GPIO transition with its CPU cycle and replays them through the chip's edge logic before the analog matrix is solved. That means the AVR can clock data through a shift register at microsecond timescales even though the outer simulator runs at 100 ms ticks — the chip sees every edge, not just the once-per-tick snapshot.
 
 ## Save / Open
 
@@ -188,3 +196,4 @@ See `chips/example-shift-register.json` for a complete example.
 - **Blink** — 555 astable circuit driving an LED (Ra=47k, Rb=68k, C=47uF)
 - **Counter** — 555 astable driving a CD4026 decade counter into a 7-segment display
 - **AVR Blink** — ATmega328P running a pre-loaded Arduino Blink sketch (pin 13 LED toggle with ~1s delay)
+- **5x7 Matrix** — ATmega328P bit-banging a 74HC595 shift register to multiplex three animated patterns (heart, square, X) on a 5x7 LED matrix. Demonstrates AVR-driven sequential digital edge replay and the matrix renderer's sliding-window aggregation that reconstructs row-multiplexed scans into a steady image.

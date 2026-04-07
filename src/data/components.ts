@@ -405,7 +405,7 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
     label: '5x7 LED Matrix',
     description: '35 tiny LEDs in a grid. Display patterns, letters, or animations.',
     icon: ':::',
-    chipLabel: '5x7',
+    chipLabel: 'LTP747C-01',
     category: 'active',
     width: 2,
     height: 7,

@@ -301,6 +301,43 @@ export const AVR_BLINK_HEX = [
 ].join('\n');
 
 /**
+ * Pre-compiled AVR hex for the 5x7 matrix demo.
+ * This firmware uses ATmega328P port lines and a 74HC595 shift register
+ * to drive the LED matrix and animate a pair of patterns.
+ */
+export const AVR_MATRIX_HEX = [
+  ':100000000C9434000C9449000C9449000C94490061',
+  ':100010000C9449000C9449000C9449000C9449003C',
+  ':100020000C9449000C9449000C9449000C9449002C',
+  ':100030000C9449000C9449000C9449000C9449001C',
+  ':100040000C9449000C9449000C9449000C9449000C',
+  ':100050000C9449000C9449000C9449000C944900FC',
+  ':100060000C9449000C94490011241FBECFEFD8E036',
+  ':10007000DEBFCDBF11E0A0E0B1E0EAE9F1E002C0EF',
+  ':1000800005900D92AC31B107D9F70E944B000C944A',
+  ':10009000CB000C940000CF92DF92EF92FF920F936F',
+  ':1000A0001F93CF93DF9384B18B6184B98AB18C6F36',
+  ':1000B0008AB98BB18C6F8BB9299860E070E0C0EE83',
+  ':1000C000DEE220EEC22E2EE2D22E91E0E92EF12CBD',
+  ':1000D00000E911E053C08BB18C6F8BB9299A8C91D8',
+  ':1000E000289820E030E0E82FF0E0CF01022E02C097',
+  ':1000F000959587950A94E2F780FF02C02B9A01C07C',
+  ':100100002B98CE010197F1F72C9ACE010197F1F7C8',
+  ':100110002C98CE010197F1F72F5F3F4F2830310522',
+  ':1001200021F7289AC6010197F1F728984630510522',
+  ':1001300079F02BB1FA01E050FF4FC701008002C0F7',
+  ':10014000880F991F0A94E2F7809582238BB901C02A',
+  ':10015000299880E293E0F8013197F1F70197D9F7F8',
+  ':100160004F5F5F4F11964730510509F0B4CF6F5F75',
+  ':100170007F4F6330710514F060E070E0DB0183E0D5',
+  ':10018000AA0FBB1F8A95E1F7A61BB70BA95FBE4F4D',
+  ':0A01900040E050E0A0CFF894FFCF4C',
+  ':10019A0002030405060701040A1F1F0E04001F11AB',
+  ':0C01AA001111111F00110A040A110000BD',
+  ':00000001FF',
+].join('\n');
+
+/**
  * ATmega328P blink demo: Arduino-style LED blink on pin D13 (PB5).
  * Pre-loaded with hand-assembled AVR machine code (no compilation needed).
  *
@@ -379,6 +416,128 @@ export function createAVRBlinkDemoCircuit(): { components: PlacedComponent[]; wi
     // R1 B (right row 18) → LED anode (right row 18): automatic via breadboard strip
     // LED cathode (right row 19) → GND rail
     { id: 'w10', from: { componentId: 'led1', pinId: 'cathode' }, to: bh(1, 19), waypoints: [], color: '#60a5fa' },
+  ];
+
+  return { components, wires };
+}
+
+/**
+ * 5x7 LED Matrix demo: ATmega328P + 74HC595 shift register driving LED matrix
+ * Shows animated patterns on the 5x7 LED matrix display.
+ *
+ * Layout:
+ * - ATmega328P at cols 6-8, rows 7-20
+ * - 74HC595 at cols 12-14, rows 10-17 (for column anodes)
+ * - 5x7 Matrix at cols 18-20, rows 12-18
+ */
+export function createMatrixDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
+  function vPos(col: number, row: number): { x: number; y: number } {
+    return { x: 96 + col * 24, y: row * 17 + 8.5 };
+  }
+  function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
+    const h = height * 17;
+    const maxOffset = (height * 2 - 1) / (height * 2);
+    return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
+  }
+
+  const components: PlacedComponent[] = [
+    {
+      id: 'power1', type: 'power',
+      position: { x: 0, y: 200 }, rotation: 0,
+      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+      state: {},
+    },
+    // ATmega328P: cols 6-8, rows 7-20
+    {
+      id: 'avr1', type: 'atmega328',
+      position: chipPos(6, 20, 14), rotation: 0,
+      properties: { clockSpeed: 16000000 },
+      state: {},
+    },
+    // 74HC595 Shift Register: board 1, straddles gap col 23, rows 7-14.
+    // Both pin rows must be in component areas (NOT power rails) and in
+    // different left/right component groups, otherwise the breadboard's per-
+    // row strip wiring shorts them together. chipPos col=22 puts left pins on
+    // col 22 (board 1 left-comp) and right pins on col 24 (board 1 right-comp).
+    {
+      id: 'shift1', type: 'shift_register',
+      position: chipPos(22, 14, 8), rotation: 0,
+      properties: {},
+      state: {},
+    },
+    // 5x7 LED Matrix: board 1, straddles gap col 23, rows 16-22.
+    // Stacked below shift1 (rows 7-14) to avoid sharing any horizontal strips.
+    {
+      id: 'matrix1', type: 'ledmatrix',
+      position: chipPos(22, 22, 7), rotation: 0,
+      properties: { color: 'red' },
+      state: {},
+    },
+  ];
+
+  const wires: Wire[] = [
+    // === Power → left rail (group 2, rows 10-14) ===
+    { id: 'm1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
+    { id: 'm2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
+
+    // === VCC (left strip row 14): + rail → left comp strip ===
+    { id: 'm3', from: bh(0, 14), to: bh(3, 14), waypoints: [], color: '#ef4444' },
+    // === GND (left strip row 13): - rail → left comp strip ===
+    { id: 'm4', from: bh(1, 13), to: bh(3, 13), waypoints: [], color: '#60a5fa' },
+
+    // === AVCC (right strip row 15): + rail → right comp strip ===
+    { id: 'm5', from: bh(0, 15), to: bh(9, 15), waypoints: [], color: '#ef4444' },
+    // === AGND (right strip row 13): - rail → right comp strip ===
+    { id: 'm6', from: bh(1, 13), to: bh(9, 13), waypoints: [], color: '#60a5fa' },
+
+    // === AVR power rails ===
+    { id: 'm7', from: { componentId: 'avr1', pinId: 'vcc' }, to: bh(9, 15), waypoints: [], color: '#ef4444' },
+    { id: 'm8', from: { componentId: 'avr1', pinId: 'gnd' }, to: bh(9, 13), waypoints: [], color: '#60a5fa' },
+    { id: 'm9', from: { componentId: 'avr1', pinId: 'avcc' }, to: bh(9, 15), waypoints: [], color: '#ef4444' },
+    { id: 'm10', from: { componentId: 'avr1', pinId: 'agnd' }, to: bh(9, 13), waypoints: [], color: '#60a5fa' },
+
+    // === RST → VCC (keep chip out of reset) ===
+    { id: 'm11', from: { componentId: 'avr1', pinId: 'pc6' }, to: { componentId: 'avr1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
+
+    // Rail jumpers: link group 2 (rows 10-14) → group 3 (rows 15-19) for AVCC + matrix power
+    ...railJumpers(0, 1, 2, 3, 'b0'),
+
+    // === ATmega328P → 74HC595 ===
+    // D11 (PB3) → SER (serial data)
+    { id: 'm12', from: { componentId: 'avr1', pinId: 'pb3' }, to: { componentId: 'shift1', pinId: 'ser' }, waypoints: [], color: '#fbbf24' },
+    // D12 (PB4) → SRCLK (shift clock)
+    { id: 'm13', from: { componentId: 'avr1', pinId: 'pb4' }, to: { componentId: 'shift1', pinId: 'srclk' }, waypoints: [], color: '#fbbf24' },
+    // D8 (PB0) → RCLK (latch clock)
+    { id: 'm14', from: { componentId: 'avr1', pinId: 'pb0' }, to: { componentId: 'shift1', pinId: 'rclk' }, waypoints: [], color: '#fbbf24' },
+    // OE → GND (always enabled)
+    { id: 'm15', from: { componentId: 'shift1', pinId: 'oe' }, to: bh(1, 13), waypoints: [], color: '#60a5fa' },
+    // SRCLR → VCC (never clear)
+    { id: 'm16', from: { componentId: 'shift1', pinId: 'srclr' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
+
+    // === 74HC595 → Matrix Columns (Anodes) ===
+    // The firmware shifts data LSB-first through all 8 bits, so a 5-bit
+    // pattern ends up in Q3..Q7 (= QD..QH), not Q0..Q4. Wire columns to
+    // those upper outputs to match.
+    { id: 'm20', from: { componentId: 'shift1', pinId: 'qd' }, to: { componentId: 'matrix1', pinId: 'c1' }, waypoints: [], color: '#22c55e' },
+    { id: 'm21', from: { componentId: 'shift1', pinId: 'qe' }, to: { componentId: 'matrix1', pinId: 'c2' }, waypoints: [], color: '#22c55e' },
+    { id: 'm22', from: { componentId: 'shift1', pinId: 'qf' }, to: { componentId: 'matrix1', pinId: 'c3' }, waypoints: [], color: '#22c55e' },
+    { id: 'm23', from: { componentId: 'shift1', pinId: 'qg' }, to: { componentId: 'matrix1', pinId: 'c4' }, waypoints: [], color: '#22c55e' },
+    { id: 'm24', from: { componentId: 'shift1', pinId: 'qh' }, to: { componentId: 'matrix1', pinId: 'c5' }, waypoints: [], color: '#22c55e' },
+
+    // === ATmega328P → Matrix Rows (Cathodes) ===
+    // D2 (PD2) → R1, D3 (PD3) → R2, D4 (PD4) → R3, D5 (PD5) → R4
+    { id: 'm30', from: { componentId: 'avr1', pinId: 'pd2' }, to: { componentId: 'matrix1', pinId: 'r1' }, waypoints: [], color: '#8b5cf6' },
+    { id: 'm31', from: { componentId: 'avr1', pinId: 'pd3' }, to: { componentId: 'matrix1', pinId: 'r2' }, waypoints: [], color: '#8b5cf6' },
+    { id: 'm32', from: { componentId: 'avr1', pinId: 'pd4' }, to: { componentId: 'matrix1', pinId: 'r3' }, waypoints: [], color: '#8b5cf6' },
+    { id: 'm33', from: { componentId: 'avr1', pinId: 'pd5' }, to: { componentId: 'matrix1', pinId: 'r4' }, waypoints: [], color: '#8b5cf6' },
+    // D6 (PD6) → R5, D7 (PD7) → R6, D9 (PB1) → R7
+    { id: 'm34', from: { componentId: 'avr1', pinId: 'pd6' }, to: { componentId: 'matrix1', pinId: 'r5' }, waypoints: [], color: '#8b5cf6' },
+    { id: 'm35', from: { componentId: 'avr1', pinId: 'pd7' }, to: { componentId: 'matrix1', pinId: 'r6' }, waypoints: [], color: '#8b5cf6' },
+    { id: 'm36', from: { componentId: 'avr1', pinId: 'pb1' }, to: { componentId: 'matrix1', pinId: 'r7' }, waypoints: [], color: '#8b5cf6' },
+
+    // === Matrix Power ===
+    { id: 'm40', from: bh(0, 15), to: { componentId: 'matrix1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
+    { id: 'm41', from: bh(1, 15), to: { componentId: 'matrix1', pinId: 'gnd' }, waypoints: [], color: '#60a5fa' },
   ];
 
   return { components, wires };

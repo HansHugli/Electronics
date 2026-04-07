@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { PlacedComponent, Wire, Point } from './types';
 import { COMPONENT_DEFINITIONS } from './data/components';
 import { GRID_W, GRID_H } from './data/breadboard';
-import { createBlinkDemoCircuit, createCounterDemoCircuit, createAVRBlinkDemoCircuit, AVR_BLINK_HEX } from './engine/simulation';
+import { createBlinkDemoCircuit, createCounterDemoCircuit, createAVRBlinkDemoCircuit, createMatrixDemoCircuit, AVR_BLINK_HEX, AVR_MATRIX_HEX } from './engine/simulation';
 import { CircuitSimulator } from './engine/CircuitSimulator';
 import { useHistory } from './hooks/useHistory';
 import { loadExternalChips } from './data/chipLoader';
@@ -504,6 +504,7 @@ function App() {
       blink:      { name: 'LED Blink Demo',     create: createBlinkDemoCircuit },
       counter:    { name: '7-Seg Counter Demo',  create: createCounterDemoCircuit },
       'avr-blink': { name: 'AVR Blink Demo',    create: createAVRBlinkDemoCircuit },
+      matrix:     { name: '5x7 Matrix Demo',    create: createMatrixDemoCircuit },
     };
     const key = demoName ?? 'blink';
     const entry = demoMap[key] ?? demoMap.blink;
@@ -516,6 +517,10 @@ function App() {
     // For AVR demos, pre-load the hex program
     if (key === 'avr-blink') {
       simulator.current.loadAVRProgram('avr1', AVR_BLINK_HEX);
+    } else if (key === 'matrix') {
+      console.log('Loading matrix demo with AVR firmware');
+      simulator.current.loadAVRProgram('avr1', AVR_MATRIX_HEX);
+      showStatus('5x7 matrix demo loaded with AVR firmware');
     }
 
     // Save to disk so user can find/modify them

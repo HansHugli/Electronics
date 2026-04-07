@@ -14,6 +14,10 @@ import {
   buildPinGroups, buildPinLookup,
 } from '../data/breadboard';
 
+const SELECTED_WIRE_COLOR = '#00ffff';
+const CHIP_PIN_LABEL_COLOR = '#c0c0c0';
+const CHIP_PIN_LABEL_FONT_FAMILY = 'monospace';
+const CHIP_PIN_LABEL_INSET = 8;
 
 interface BreadboardProps {
   components: PlacedComponent[];
@@ -316,48 +320,71 @@ function routeWire(
   // Each candidate is the MIDDLE portion; we prepend from→a and append b→to.
   const candidates: Point[][] = [];
 
+  // Direct horizontal / vertical route if possible.
+  if (a.x === b.x || a.y === b.y) {
+    candidates.push([a, b]);
+  }
+
   // L-shapes (2 segments between stubs)
   candidates.push([a, { x: b.x, y: a.y }, b]);
   candidates.push([a, { x: a.x, y: b.y }, b]);
 
-  // Z-shapes (3 segments) at various midpoints
-  const midXs = [
+  // Z-shapes (3 segments) at nearby offsets.
+  const safeXs = Array.from(new Set([
+    a.x, b.x,
     (a.x + b.x) / 2,
     a.x - GRID_W, a.x + GRID_W,
     b.x - GRID_W, b.x + GRID_W,
-    (a.x + b.x) / 2 - GRID_W, (a.x + b.x) / 2 + GRID_W,
-  ];
-  const midYs = [
+  ]));
+  const safeYs = Array.from(new Set([
+    a.y, b.y,
     (a.y + b.y) / 2,
     a.y - GRID_H, a.y + GRID_H,
     b.y - GRID_H, b.y + GRID_H,
-    (a.y + b.y) / 2 - GRID_H, (a.y + b.y) / 2 + GRID_H,
-  ];
-  for (const mx of midXs) {
+  ]));
+
+  for (const mx of safeXs) {
     candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
   }
-  for (const my of midYs) {
+  for (const my of safeYs) {
     candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
   }
 
-  // U-shapes going wide (try progressively wider offsets)
-  for (let m = 2; m <= 5; m++) {
+  // U-shapes going wider with increasing offsets.
+  for (let offset = 2; offset <= 6; offset++) {
     for (const sign of [1, -1]) {
-      const my = Math.min(a.y, b.y) + sign * GRID_H * m;
-      candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
-      const mx = Math.min(a.x, b.x) + sign * GRID_W * m;
+      const mx = Math.min(a.x, b.x) + sign * GRID_W * offset;
+      const my = Math.min(a.y, b.y) + sign * GRID_H * offset;
       candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
+      candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
     }
   }
 
-  // Test each candidate with stubs attached
-  for (const mid of candidates) {
+  function pathLength(pts: Point[]) {
+    let length = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      length += Math.abs(pts[i + 1].x - pts[i].x) + Math.abs(pts[i + 1].y - pts[i].y);
+    }
+    return length;
+  }
+
+  function scoreCandidate(mid: Point[]) {
+    const full = [from, ...mid, to];
+    return mid.length * 100 + pathLength(full);
+  }
+
+  const uniqueCandidates = candidates
+    .map((mid) => ({ mid, score: scoreCandidate(mid) }))
+    .sort((a, b) => a.score - b.score)
+    .map((entry) => entry.mid);
+
+  for (const mid of uniqueCandidates) {
     const full = [from, ...mid, to];
     if (pathClear(full)) return full;
   }
 
-  // Second-pass fallback: try jog offsets on the L-shape to avoid parallel overlap
-  for (let jog = 1; jog <= 4; jog++) {
+  // Second-pass fallback: try jog offsets on the L-shape to avoid existing parallel wires.
+  for (let jog = 1; jog <= 5; jog++) {
     for (const sign of [1, -1]) {
       const jogX = a.x + sign * GRID_W * jog;
       const fb1 = [from, a, { x: jogX, y: a.y }, { x: jogX, y: b.y }, b, to];
@@ -481,6 +508,8 @@ export default function Breadboard({
   const isPanning = useRef(false);
   const panStart = useRef<Point>({ x: 0, y: 0 });
   const panOffsetStart = useRef<Point>({ x: 0, y: 0 });
+  const componentsRef = useRef(components);
+  componentsRef.current = components;
 
   // Pin group data for hover highlighting
   const pinGroups = useMemo(() => buildPinGroups(), []);
@@ -544,8 +573,16 @@ export default function Breadboard({
     if (!wiringFrom || !mousePos) return null;
     const fromPos = getEndpointPos(wiringFrom);
     if (!fromPos) return null;
-    const midX = mousePos.x;
-    const points: Point[] = [fromPos, { x: midX, y: fromPos.y }, { x: midX, y: mousePos.y }, mousePos];
+    const points = routeWire(
+      fromPos,
+      mousePos,
+      components,
+      wiringFrom.componentId,
+      wiringFrom.pinId,
+      'board',
+      'preview',
+      []
+    );
     return pointsToPathD(points);
   }, [wiringFrom, mousePos, components]);
 
@@ -670,11 +707,11 @@ export default function Breadboard({
         });
 
         const valid = moves.every(({ id, position }) => {
-          const comp = components.find((c) => c.id === id);
+          const comp = componentsRef.current.find((c) => c.id === id);
           if (!comp) return false;
           if (!isValidPlacement(comp.type, position, comp.rotation)) return false;
           const candidate = { ...comp, position };
-          return !components.some(
+          return !componentsRef.current.some(
             (other) => !groupIds.has(other.id) && componentsOverlap(candidate, other)
           );
         });
@@ -687,7 +724,7 @@ export default function Breadboard({
         }
       }
     },
-    [getSVGCoords, onMoveComponent, wiringFrom, zoom]
+    [getSVGCoords, onMoveComponent, onMoveSelection, wiringFrom, zoom]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -723,6 +760,9 @@ export default function Breadboard({
   );
 
   const handleBoardMouseDown = useCallback((e: React.MouseEvent) => {
+    // Clear any lingering drag state
+    dragRef.current = null;
+
     // Ctrl+click to pan
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
@@ -1032,7 +1072,7 @@ export default function Breadboard({
             />
             <path
               d={path}
-              stroke={selectedWireId === wire.id ? '#38bdf8' : wire.color}
+              stroke={selectedWireId === wire.id ? SELECTED_WIRE_COLOR : wire.color}
               strokeWidth={selectedWireId === wire.id ? 3.5 : 2.5}
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -1233,9 +1273,6 @@ export default function Breadboard({
               );
             })() : comp.type === 'led' ? (
               <>
-                {isLedOn && (
-                  <circle cx={w / 2} cy={h / 2} r={w / 2 + 4 + 6 * ledBrightness} fill={ledColor} opacity={0.2 + 0.5 * ledBrightness} />
-                )}
                 <circle
                   cx={w / 2}
                   cy={h / 2}
@@ -1285,16 +1322,26 @@ export default function Breadboard({
               // Display window in the upper 60% of the chip
               const dh = h * 0.55;
               const pad = 4;
-              const sw = w - pad * 2; // segment area width
+              const sw = Math.max(16, (w - pad * 2) * 0.58); // narrower segment area for a more numeric shape
+              const windowWidth = sw + 4;
+              const windowX = (w - windowWidth) / 2;
               const sh = (dh - pad * 2) * 0.48; // half height
               const t = 1.5;
-              const ox = pad;
+              const ox = windowX + 2;
               const oy = pad + 2;
+              const pinLabelInset = CHIP_PIN_LABEL_INSET;
+              const pinLabelStyle = {
+                fill: CHIP_PIN_LABEL_COLOR,
+                fontSize: 3.5,
+                fontFamily: CHIP_PIN_LABEL_FONT_FAMILY,
+                pointerEvents: 'none' as const,
+              };
+
               return (
                 <>
                   <rect width={w} height={h} fill="#1a1a1a" stroke="#333" strokeWidth={1} rx={2} />
                   {/* Display window */}
-                  <rect x={2} y={2} width={w - 4} height={dh} fill="#0a0a0a" rx={1} />
+                  <rect x={windowX} y={2} width={windowWidth} height={dh} fill="#0a0a0a" rx={1} />
                   {/* a: top horizontal */}
                   <rect x={ox} y={oy} width={sw} height={t} fill={segA} rx={0.5} />
                   {/* b: top-right vertical */}
@@ -1312,16 +1359,21 @@ export default function Breadboard({
                   {/* Pin 1 notch */}
                   <circle cx={w / 2} cy={h} r={2} fill="#0a0a0a" stroke="#444" strokeWidth={0.5} />
                   {/* Pin labels */}
-                  <text x={4} y={h * 0.9 + 1} fill="#999" fontSize={3} pointerEvents="none">1 e</text>
-                  <text x={4} y={h * 0.7 + 1} fill="#999" fontSize={3} pointerEvents="none">2 d</text>
-                  <text x={4} y={h * 0.5 + 1} fill="#999" fontSize={3} pointerEvents="none">3 ⏚</text>
-                  <text x={4} y={h * 0.3 + 1} fill="#999" fontSize={3} pointerEvents="none">4 c</text>
-                  <text x={4} y={h * 0.1 + 1} fill="#999" fontSize={3} pointerEvents="none">5 dp</text>
-                  <text x={w - 4} y={h * 0.9 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">b 6</text>
-                  <text x={w - 4} y={h * 0.7 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">a 7</text>
-                  <text x={w - 4} y={h * 0.5 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">V+ 8</text>
-                  <text x={w - 4} y={h * 0.3 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">f 9</text>
-                  <text x={w - 4} y={h * 0.1 + 1} fill="#999" fontSize={3} textAnchor="end" pointerEvents="none">g 10</text>
+                  {/* Pin labels — hidden during run mode for a cleaner display */}
+                  {!simRunning && (
+                    <>
+                      <text x={pinLabelInset} y={h * 0.9 + 1} textAnchor="start" dominantBaseline="middle" {...pinLabelStyle}>1 e</text>
+                      <text x={pinLabelInset} y={h * 0.7 + 1} textAnchor="start" dominantBaseline="middle" {...pinLabelStyle}>2 d</text>
+                      <text x={pinLabelInset} y={h * 0.5 + 1} textAnchor="start" dominantBaseline="middle" {...pinLabelStyle}>3 ⏚</text>
+                      <text x={pinLabelInset} y={h * 0.3 + 1} textAnchor="start" dominantBaseline="middle" {...pinLabelStyle}>4 c</text>
+                      <text x={pinLabelInset} y={h * 0.1 + 1} textAnchor="start" dominantBaseline="middle" {...pinLabelStyle}>5 dp</text>
+                      <text x={w - pinLabelInset} y={h * 0.9 + 1} textAnchor="end" dominantBaseline="middle" {...pinLabelStyle}>b 6</text>
+                      <text x={w - pinLabelInset} y={h * 0.7 + 1} textAnchor="end" dominantBaseline="middle" {...pinLabelStyle}>a 7</text>
+                      <text x={w - pinLabelInset} y={h * 0.5 + 1} textAnchor="end" dominantBaseline="middle" {...pinLabelStyle}>V+ 8</text>
+                      <text x={w - pinLabelInset} y={h * 0.3 + 1} textAnchor="end" dominantBaseline="middle" {...pinLabelStyle}>f 9</text>
+                      <text x={w - pinLabelInset} y={h * 0.1 + 1} textAnchor="end" dominantBaseline="middle" {...pinLabelStyle}>g 10</text>
+                    </>
+                  )}
                 </>
               );
             })() : comp.type === 'ledmatrix' ? (() => {
@@ -1331,7 +1383,7 @@ export default function Breadboard({
                 white: '#f1f5f9', orange: '#f97316',
               };
               const matOnColor = matrixColorMap[comp.properties.color as string] || '#ef4444';
-              const matOffColor = '#1a0a0a';
+              const matOffColor = '#666666';
               const padX = 6;
               const padY = 4;
               const displayW = w - padX * 2;
@@ -1339,15 +1391,31 @@ export default function Breadboard({
               const dotW = displayW / 5;
               const dotH = displayH / 7;
               const dotR = Math.min(dotW, dotH) * 0.3;
+
+              // Pin labels for matrix
+              const leftPins = def.pins.filter((p) => p.side === 'left');
+              const rightPins = def.pins.filter((p) => p.side === 'right');
+              const leftSorted = [...leftPins].sort((a, b) => b.offset - a.offset);
+              const rightSorted = [...rightPins].sort((a, b) => b.offset - a.offset);
+              const pinTextStyle = {
+                fill: CHIP_PIN_LABEL_COLOR,
+                fontSize: 3.5,
+                fontFamily: CHIP_PIN_LABEL_FONT_FAMILY,
+                pointerEvents: 'none' as const,
+              };
+
               return (
                 <>
                   <rect width={w} height={h} fill="#1a1a1a" stroke="#333" strokeWidth={1} rx={2} />
                   {/* Display window */}
                   <rect x={padX - 2} y={padY - 2} width={displayW + 4} height={displayH + 4} fill="#0a0a0a" rx={1} />
-                  {/* LED dots (5 cols x 7 rows) */}
+                  {/* LED dots (5 cols x 7 rows). The simulator OR-aggregates
+                      a sliding window of recent frames into led_c_r, so each
+                      LED is either fully on or fully off — multiplexed scans
+                      reconstruct as steady binary images. */}
                   {Array.from({ length: 5 }).map((_, c) =>
                     Array.from({ length: 7 }).map((_, r) => {
-                      const isOn = comp.state?.[`led_${c}_${r}`];
+                      const isOn = !!comp.state?.[`led_${c}_${r}`];
                       return (
                         <circle
                           key={`dot-${c}-${r}`}
@@ -1362,6 +1430,37 @@ export default function Breadboard({
                   )}
                   {/* Pin 1 notch */}
                   <circle cx={w / 2} cy={h} r={2} fill="#0a0a0a" stroke="#444" strokeWidth={0.5} />
+                  {/* Pin labels — hidden during run mode for a cleaner display */}
+                  {!simRunning && leftSorted.map((pin, i) => (
+                    <text
+                      key={pin.id}
+                      x={CHIP_PIN_LABEL_INSET}
+                      y={h * pin.offset + 0.5}
+                      textAnchor="start"
+                      dominantBaseline="middle"
+                      {...pinTextStyle}
+                    >
+                      {i + 1} {pin.label}
+                    </text>
+                  ))}
+                  {!simRunning && rightSorted.map((pin, i) => (
+                    <text
+                      key={pin.id}
+                      x={w - CHIP_PIN_LABEL_INSET}
+                      y={h * pin.offset + 0.5}
+                      textAnchor="end"
+                      dominantBaseline="middle"
+                      {...pinTextStyle}
+                    >
+                      {pin.label} {leftSorted.length + i + 1}
+                    </text>
+                  ))}
+                  {/* Chip label — hidden in run mode for a cleaner display */}
+                  {!simRunning && (
+                    <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={4.5} fontWeight="600" pointerEvents="none">
+                      {def.chipLabel ?? def.label}
+                    </text>
+                  )}
                 </>
               );
             })() : comp.type === 'multimeter' ? (() => {
@@ -1439,38 +1538,61 @@ export default function Breadboard({
             )}
 
             {/* Generic DIP chip rendering for all IC category components */}
-            {def.category === 'active' && comp.type !== 'display7seg' && comp.type !== 'ledmatrix' && (() => {
+            {def.category === 'active' && comp.type !== 'display7seg' && (() => {
               const leftPins = def.pins.filter((p) => p.side === 'left');
               const rightPins = def.pins.filter((p) => p.side === 'right');
               const totalPins = leftPins.length + rightPins.length;
-              const fontSize = totalPins <= 8 ? 3.5 : totalPins <= 12 ? 3 : 2.5;
-              const inset = totalPins <= 8 ? 5 : 4;
+              // Use consistent chip pin label size across active DIP parts, matching the 555 style.
+              const fontSize = 3.5;
+              const inset = CHIP_PIN_LABEL_INSET;
               const notchR = totalPins <= 8 ? 3 : 2;
 
               // Number pins: left bottom-to-top = 1..N, right bottom-to-top = N+1..2N
               const leftSorted = [...leftPins].sort((a, b) => b.offset - a.offset);
               const rightSorted = [...rightPins].sort((a, b) => b.offset - a.offset);
+              const pinTextStyle = {
+                fill: CHIP_PIN_LABEL_COLOR,
+                fontSize,
+                fontFamily: CHIP_PIN_LABEL_FONT_FAMILY,
+                pointerEvents: 'none' as const,
+              };
 
               return (
                 <>
                   {/* Pin 1 notch */}
                   <circle cx={w / 2} cy={h} r={notchR} fill="#0f172a" stroke="#888" strokeWidth={0.5} opacity={0.6} />
-                  {/* Left pin labels */}
-                  {leftSorted.map((pin, i) => (
-                    <text key={pin.id} x={inset} y={h * pin.offset + 0.5} fill="#c0c0c0" fontSize={fontSize} pointerEvents="none">
+                  {/* Pin labels — hidden during run mode for a cleaner display */}
+                  {!simRunning && leftSorted.map((pin, i) => (
+                    <text
+                      key={pin.id}
+                      x={inset}
+                      y={h * pin.offset + 0.5}
+                      textAnchor="start"
+                      dominantBaseline="middle"
+                      {...pinTextStyle}
+                    >
                       {i + 1} {pin.label}
                     </text>
                   ))}
-                  {/* Right pin labels */}
-                  {rightSorted.map((pin, i) => (
-                    <text key={pin.id} x={w - inset} y={h * pin.offset + 0.5} fill="#c0c0c0" fontSize={fontSize} textAnchor="end" pointerEvents="none">
+                  {!simRunning && rightSorted.map((pin, i) => (
+                    <text
+                      key={pin.id}
+                      x={w - inset}
+                      y={h * pin.offset + 0.5}
+                      textAnchor="end"
+                      dominantBaseline="middle"
+                      {...pinTextStyle}
+                    >
                       {pin.label} {leftSorted.length + i + 1}
                     </text>
                   ))}
-                  {/* Chip name — short part number for the body */}
-                  <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={fontSize + 1} fontWeight="600" pointerEvents="none">
-                    {def.chipLabel ?? def.label}
-                  </text>
+                  {/* Chip name — short part number for the body. Hidden in
+                      run mode for a cleaner display. */}
+                  {!simRunning && (
+                    <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={fontSize + 1} fontWeight="600" pointerEvents="none">
+                      {def.chipLabel ?? def.label}
+                    </text>
+                  )}
                   {/* 555 Timer output indicator */}
                   {comp.type === 'timer' && (
                     <circle cx={w / 2} cy={h * 0.15} r={2} fill={isTimerHigh ? '#4ade80' : '#334155'} />
@@ -1485,8 +1607,9 @@ export default function Breadboard({
               );
             })()}
 
-            {/* Label (skip for components with custom rendering) */}
-            {comp.type !== 'led' && comp.type !== 'resistor' && comp.type !== 'capacitor' && comp.type !== 'switch' && comp.type !== 'potentiometer' && comp.type !== 'display7seg' && comp.type !== 'multimeter' && def.category !== 'active' && (
+            {/* Label (skip for components with custom rendering).
+                Hidden in run mode for a cleaner display. */}
+            {!simRunning && comp.type !== 'led' && comp.type !== 'resistor' && comp.type !== 'capacitor' && comp.type !== 'switch' && comp.type !== 'potentiometer' && comp.type !== 'display7seg' && comp.type !== 'multimeter' && def.category !== 'active' && (
               <text
                 x={w / 2}
                 y={comp.type === 'power' ? h / 2 - 2 : h / 2 + 4}
@@ -1557,8 +1680,9 @@ export default function Breadboard({
                 case 'bottom': px = w * pin.offset; py = h;  break;
               }
 
-              // Generic pin label placement: always inside component, inset from pin
-              const showLabel = def.category !== 'active' && comp.type !== 'switch';
+              // Generic pin label placement: always inside component, inset from pin.
+              // Hidden in run mode for a cleaner display.
+              const showLabel = !simRunning && def.category !== 'active' && comp.type !== 'switch';
               const gridUnits = Math.min(def.width, def.height);
               const labelSize = gridUnits <= 1 ? 3.5 : 4;
               const inset = gridUnits <= 1 ? 5 : 7;
