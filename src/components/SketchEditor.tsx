@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 const DEFAULT_SKETCH = `// Blink LED on pin 13
 void setup() {
@@ -18,11 +18,31 @@ interface SketchEditorProps {
   onClose: () => void;
 }
 
+/** Parse arduino-cli compile errors into structured format. */
+function parseCompileErrors(raw: string): { line: number; col: number; level: string; text: string }[] {
+  const errors: { line: number; col: number; level: string; text: string }[] = [];
+  // Match patterns like: sketch.ino:5:3: error: expected ';' before '}' token
+  const regex = /sketch\.ino:(\d+):(\d+):\s*(error|warning|note):\s*(.+)/g;
+  let match;
+  while ((match = regex.exec(raw)) !== null) {
+    errors.push({
+      line: parseInt(match[1], 10),
+      col: parseInt(match[2], 10),
+      level: match[3],
+      text: match[4].trim(),
+    });
+  }
+  return errors;
+}
+
 export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps) {
   const [code, setCode] = useState(DEFAULT_SKETCH);
   const [status, setStatus] = useState<'idle' | 'setting-up' | 'compiling' | 'done' | 'error'>('idle');
   const [message, setMessage] = useState('');
+  const [compileErrors, setCompileErrors] = useState<{ line: number; col: number; level: string; text: string }[]>([]);
   const [cliReady, setCliReady] = useState(false);
+  const [setupProgress, setSetupProgress] = useState('');
+  const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Check arduino-cli status on mount
   useEffect(() => {
@@ -37,39 +57,80 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
     });
   }, []);
 
+  // Cleanup progress timer
+  useEffect(() => {
+    return () => {
+      if (progressTimer.current) clearInterval(progressTimer.current);
+    };
+  }, []);
+
   const handleSetup = async () => {
     if (!window.electronApi?.arduinoSetup) return;
     setStatus('setting-up');
-    setMessage('Downloading arduino-cli and AVR core... This may take a few minutes on first run.');
+    setCompileErrors([]);
+
+    // Animated progress messages
+    const steps = [
+      'Downloading arduino-cli...',
+      'Extracting archive...',
+      'Installing AVR core (this may take a few minutes)...',
+      'Downloading toolchain packages...',
+      'Still working...',
+    ];
+    let stepIdx = 0;
+    setSetupProgress(steps[0]);
+    progressTimer.current = setInterval(() => {
+      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
+      setSetupProgress(steps[stepIdx]);
+    }, 8000);
+
     try {
       const result = await window.electronApi.arduinoSetup();
+      if (progressTimer.current) { clearInterval(progressTimer.current); progressTimer.current = null; }
       if (result.success) {
         setCliReady(true);
         setStatus('idle');
-        setMessage('Setup complete');
+        setMessage('Setup complete — ready to compile!');
+        setSetupProgress('');
       } else {
         setStatus('error');
-        setMessage('Setup failed');
+        setMessage((result as { error?: string }).error || 'Setup failed');
+        setSetupProgress('');
       }
     } catch (e) {
+      if (progressTimer.current) { clearInterval(progressTimer.current); progressTimer.current = null; }
       setStatus('error');
       setMessage(`Setup failed: ${(e as Error).message}`);
+      setSetupProgress('');
     }
   };
 
   const handleCompile = async () => {
     if (!window.electronApi?.arduinoCompile) return;
     setStatus('compiling');
-    setMessage('Compiling...');
+    setMessage('Compiling sketch...');
+    setCompileErrors([]);
     try {
       const result = await window.electronApi.arduinoCompile(code);
       if (result.success && result.hex) {
         setStatus('done');
-        setMessage('Compilation successful');
+        setMessage('Compilation successful — hex loaded into simulator');
         onCompiled(result.hex);
       } else {
         setStatus('error');
-        setMessage(result.error || 'Compilation failed');
+        const errText = result.error || 'Compilation failed';
+        const parsed = parseCompileErrors(errText);
+        if (parsed.length > 0) {
+          setCompileErrors(parsed);
+          const errCount = parsed.filter((e) => e.level === 'error').length;
+          const warnCount = parsed.filter((e) => e.level === 'warning').length;
+          const parts = [];
+          if (errCount) parts.push(`${errCount} error${errCount > 1 ? 's' : ''}`);
+          if (warnCount) parts.push(`${warnCount} warning${warnCount > 1 ? 's' : ''}`);
+          setMessage(`Compilation failed: ${parts.join(', ')}`);
+        } else {
+          setMessage(errText);
+        }
       }
     } catch (e) {
       setStatus('error');
@@ -77,20 +138,54 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
     }
   };
 
+  const lineCount = code.split('\n').length;
+
   return (
     <div className="modal-overlay">
       <div className="modal sketch-modal">
         <h2 className="modal-title">Arduino Sketch Editor</h2>
-        <textarea
-          className="sketch-textarea"
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-          spellCheck={false}
-          placeholder="Paste your Arduino sketch here..."
-        />
-        {message && (
+        <div className="sketch-editor-wrap">
+          {/* Line numbers */}
+          <div className="sketch-line-numbers">
+            {Array.from({ length: lineCount }, (_, i) => (
+              <div
+                key={i + 1}
+                className={`sketch-line-num ${compileErrors.some((e) => e.line === i + 1) ? 'error' : ''}`}
+              >
+                {i + 1}
+              </div>
+            ))}
+          </div>
+          <textarea
+            className="sketch-textarea"
+            value={code}
+            onChange={(e) => { setCode(e.target.value); setCompileErrors([]); }}
+            spellCheck={false}
+            placeholder="Write your Arduino sketch here..."
+          />
+        </div>
+        {/* Compile errors list */}
+        {compileErrors.length > 0 && (
+          <div className="sketch-errors">
+            {compileErrors.map((err, i) => (
+              <div key={i} className={`sketch-error-item ${err.level}`}>
+                <span className="sketch-error-loc">Line {err.line}:{err.col}</span>
+                <span className="sketch-error-level">{err.level}</span>
+                <span className="sketch-error-text">{err.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* Status message */}
+        {message && !compileErrors.length && (
           <div className={`sketch-message ${status === 'error' ? 'error' : status === 'done' ? 'success' : ''}`}>
             {message}
+          </div>
+        )}
+        {/* Setup progress */}
+        {status === 'setting-up' && setupProgress && (
+          <div className="sketch-message">
+            <span className="sketch-spinner" /> {setupProgress}
           </div>
         )}
         <div className="modal-actions">

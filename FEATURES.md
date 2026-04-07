@@ -68,9 +68,11 @@ Hover any pin hole to see its connected strip highlighted in yellow.
 ## Selection and Editing
 
 - **Click** a component to select it — properties appear in the right panel
+- **Ctrl+Click** a component to add/remove it from the current selection
+- **Drag** any selected component to move the whole selected group together
 - **Click** a wire to select it — color picker appears
-- **Delete/Backspace** — delete the selected component or wire
-- **R** — rotate the selected component 90 degrees
+- **Delete/Backspace** — delete the selected component(s) or wire
+- **R** — rotate the selected component 90 degrees (only when a single component is selected)
 - **Escape** — deselect everything and cancel wiring
 
 ## Keyboard Shortcuts
@@ -87,7 +89,9 @@ Hover any pin hole to see its connected strip highlighted in yellow.
 | R | Rotate selected |
 | Escape | Cancel / deselect |
 | Mousewheel | Zoom in/out |
-| Ctrl+Click drag | Pan the view |
+| Ctrl+Click | Add/remove component to/from selection |
+| Drag selected components | Move grouped selection |
+| Ctrl+Click drag (empty board) | Pan the view |
 
 ## Simulation
 

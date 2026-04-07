@@ -147,17 +147,23 @@ ipcMain.handle('arduino-status', () => {
 });
 
 ipcMain.handle('arduino-setup', async () => {
-  const status = getSetupStatus();
-  const messages: string[] = [];
-  if (!status.cliInstalled) {
-    const msg = await downloadCli();
-    messages.push(msg);
+  try {
+    const status = getSetupStatus();
+    const messages: string[] = [];
+    if (!status.cliInstalled) {
+      const msg = await downloadCli();
+      messages.push(msg);
+    }
+    if (!status.coreInstalled) {
+      const msg = await installCore();
+      messages.push(msg);
+    }
+    return { success: true, messages };
+  } catch (err: unknown) {
+    const e = err as { message?: string; stderr?: string };
+    const detail = e.stderr || e.message || 'Unknown error during setup';
+    return { success: false, error: detail };
   }
-  if (!status.coreInstalled) {
-    const msg = await installCore();
-    messages.push(msg);
-  }
-  return { success: true, messages };
 });
 
 ipcMain.handle('arduino-compile', async (_event, sketchCode: string) => {

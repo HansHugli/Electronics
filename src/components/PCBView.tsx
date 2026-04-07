@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { PlacedComponent, Wire } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
+import { formatValue } from '../utils/format';
 import {
   GRID_W, GRID_H, BOARD_X_OFFSET,
   buildPinGroups, buildPinLookup,
@@ -59,27 +60,39 @@ function getRef(comp: PlacedComponent): string {
   }
 }
 
-/** Map footprint sizes (grid units for PCB layout). */
+/** Get a human-readable value string for a component. */
+function getValueLabel(comp: PlacedComponent): string {
+  const def = COMPONENT_DEFINITIONS[comp.type];
+  if (!def) return '';
+  switch (comp.type) {
+    case 'resistor': return formatValue(Number(comp.properties.resistance ?? 220), 'Ω');
+    case 'capacitor': return formatValue(Number(comp.properties.capacitance ?? 100), 'F', -6);
+    case 'led': return String(comp.properties.color ?? 'red').toUpperCase();
+    default: return def.chipLabel ?? def.label ?? '';
+  }
+}
+
+/** Map footprint sizes (pixels for PCB layout). */
 function getFootprintSize(type: string): { w: number; h: number } {
   switch (type) {
-    case 'resistor': return { w: 120, h: 40 };
-    case 'capacitor': return { w: 60, h: 60 };
-    case 'led': return { w: 50, h: 50 };
-    case 'switch': return { w: 60, h: 40 };
-    case 'potentiometer': return { w: 70, h: 70 };
-    case 'vreg': return { w: 60, h: 80 };
-    case 'funcgen': return { w: 100, h: 60 };
+    case 'resistor': return { w: 100, h: 36 };
+    case 'capacitor': return { w: 50, h: 50 };
+    case 'led': return { w: 44, h: 44 };
+    case 'switch': return { w: 50, h: 36 };
+    case 'potentiometer': return { w: 60, h: 60 };
+    case 'vreg': return { w: 50, h: 70 };
+    case 'funcgen': return { w: 90, h: 50 };
     default: {
       const def = COMPONENT_DEFINITIONS[type];
-      if (!def) return { w: 80, h: 80 };
+      if (!def) return { w: 70, h: 70 };
       const pinCount = def.pins.length;
-      return { w: Math.max(80, def.width * 40), h: Math.max(60, pinCount * 14) };
+      return { w: Math.max(70, def.width * 36), h: Math.max(50, pinCount * 12) };
     }
   }
 }
 
-const BOARD_PAD = 60;
-const COMP_SPACING = 40;
+const BOARD_PAD = 50;
+const COMP_SPACING = 60;
 
 interface LayoutItem {
   comp: PlacedComponent;
@@ -91,17 +104,23 @@ interface LayoutItem {
   pins: { id: string; label: string; x: number; y: number }[];
 }
 
+/** Assign distinct colors per net for visual clarity. */
+const NET_COLORS = [
+  '#c8a96e', '#e8783a', '#5bb5e8', '#8bc34a', '#ff7043',
+  '#ab47bc', '#26a69a', '#ef5350', '#66bb6a', '#ffa726',
+  '#42a5f5', '#ec407a', '#7e57c2', '#29b6f6', '#d4e157',
+];
+
 export default function PCBView({ components, wires, onClose }: PCBViewProps) {
-  // Auto-layout components on a PCB board
   const { items, boardW, boardH, nets } = useMemo(() => {
     const placeable = components.filter((c) => c.type !== 'power' && c.type !== 'multimeter');
     const layoutItems: LayoutItem[] = [];
 
-    // Simple grid layout
+    // --- Auto-layout: row-based with generous spacing ---
     let curX = BOARD_PAD;
     let curY = BOARD_PAD;
     let rowH = 0;
-    const maxW = 1000;
+    const maxW = 800;
 
     for (const comp of placeable) {
       const def = COMPONENT_DEFINITIONS[comp.type];
@@ -114,41 +133,36 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
         rowH = 0;
       }
 
-      // Generate pin positions
+      // Generate pin positions evenly along each side
       const pins: LayoutItem['pins'] = [];
       const leftPins = def.pins.filter((p) => p.side === 'left');
       const rightPins = def.pins.filter((p) => p.side === 'right');
       const topPins = def.pins.filter((p) => p.side === 'top');
       const bottomPins = def.pins.filter((p) => p.side === 'bottom');
 
+      const PAD_INSET = 4; // keep pads slightly inside body edge
       leftPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX, y: curY + ((i + 0.5) / Math.max(leftPins.length, 1)) * h });
+        pins.push({ id: p.id, label: p.label, x: curX - PAD_INSET, y: curY + ((i + 0.5) / Math.max(leftPins.length, 1)) * h });
       });
       rightPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX + w, y: curY + ((i + 0.5) / Math.max(rightPins.length, 1)) * h });
+        pins.push({ id: p.id, label: p.label, x: curX + w + PAD_INSET, y: curY + ((i + 0.5) / Math.max(rightPins.length, 1)) * h });
       });
       topPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(topPins.length, 1)) * w, y: curY });
+        pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(topPins.length, 1)) * w, y: curY - PAD_INSET });
       });
       bottomPins.forEach((p, i) => {
-        pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(bottomPins.length, 1)) * w, y: curY + h });
+        pins.push({ id: p.id, label: p.label, x: curX + ((i + 0.5) / Math.max(bottomPins.length, 1)) * w, y: curY + h + PAD_INSET });
       });
 
-      layoutItems.push({
-        comp,
-        ref: getRef(comp),
-        x: curX, y: curY, w, h,
-        pins,
-      });
-
+      layoutItems.push({ comp, ref: getRef(comp), x: curX, y: curY, w, h, pins });
       curX += w + COMP_SPACING;
       if (h > rowH) rowH = h;
     }
 
     const bw = maxW + BOARD_PAD;
-    const bh = curY + rowH + BOARD_PAD * 2;
+    const bh = Math.max(curY + rowH + BOARD_PAD * 2, 200);
 
-    // Build nets using Union-Find (same as simulator) to capture breadboard internal connections
+    // --- Build nets using Union-Find ---
     const parent = new Map<string, string>();
     function find(k: string): string {
       if (!parent.has(k)) parent.set(k, k);
@@ -167,28 +181,25 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
 
     const pk = (compId: string, pinId: string) => `${compId}:${pinId}`;
 
-    // Register all component pins
     for (const comp of placeable) {
       const def = COMPONENT_DEFINITIONS[comp.type];
       if (!def) continue;
       for (const pin of def.pins) find(pk(comp.id, pin.id));
     }
 
-    // Merge by wires
     for (const wire of wires) {
       find(pk(wire.from.componentId, wire.from.pinId));
       find(pk(wire.to.componentId, wire.to.pinId));
       union(pk(wire.from.componentId, wire.from.pinId), pk(wire.to.componentId, wire.to.pinId));
     }
 
-    // Merge switch pins if closed
     for (const comp of placeable) {
       if (comp.type === 'switch' && comp.state?.closed) {
         union(pk(comp.id, 'a'), pk(comp.id, 'b'));
       }
     }
 
-    // Breadboard internal wiring: merge pins in same strip
+    // Breadboard internal wiring
     const groupToPins = new Map<string, string[]>();
     for (const comp of placeable) {
       if (comp.type === 'power') continue;
@@ -205,7 +216,6 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
         groupToPins.get(groupId)!.push(key);
       }
     }
-    // Also include board pin wire endpoints
     for (const wire of wires) {
       for (const ep of [wire.from, wire.to]) {
         if (ep.componentId === 'board') {
@@ -222,7 +232,7 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
       for (let i = 1; i < pins.length; i++) union(pins[0], pins[i]);
     }
 
-    // Group layout pins by net root
+    // --- Build net traces with MST (minimum spanning tree) for cleaner routing ---
     const netGroups = new Map<string, { x: number; y: number }[]>();
     for (const item of layoutItems) {
       const def = COMPONENT_DEFINITIONS[item.comp.type];
@@ -236,13 +246,38 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
       }
     }
 
-    // Draw traces: connect each pin in a net to the next (chain)
-    const netTraces: { from: { x: number; y: number }; to: { x: number; y: number } }[] = [];
+    // Use Prim's MST to connect pins within each net (avoids long chain routing)
+    const netTraces: { from: { x: number; y: number }; to: { x: number; y: number }; netIdx: number }[] = [];
+    let netIdx = 0;
     for (const [, pts] of netGroups) {
-      if (pts.length < 2) continue;
-      for (let i = 0; i < pts.length - 1; i++) {
-        netTraces.push({ from: pts[i], to: pts[i + 1] });
+      if (pts.length < 2) { netIdx++; continue; }
+
+      // Prim's MST
+      const inTree = new Set<number>([0]);
+      const remaining = new Set<number>();
+      for (let i = 1; i < pts.length; i++) remaining.add(i);
+
+      while (remaining.size > 0) {
+        let bestDist = Infinity;
+        let bestFrom = 0;
+        let bestTo = 0;
+        for (const fi of inTree) {
+          for (const ti of remaining) {
+            const dx = pts[fi].x - pts[ti].x;
+            const dy = pts[fi].y - pts[ti].y;
+            const dist = Math.abs(dx) + Math.abs(dy); // Manhattan
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestFrom = fi;
+              bestTo = ti;
+            }
+          }
+        }
+        inTree.add(bestTo);
+        remaining.delete(bestTo);
+        netTraces.push({ from: pts[bestFrom], to: pts[bestTo], netIdx });
       }
+      netIdx++;
     }
 
     return { items: layoutItems, boardW: bw, boardH: bh, nets: netTraces };
@@ -257,24 +292,33 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
         </div>
         <div className="pcb-canvas-wrap">
           <svg className="pcb-canvas" viewBox={`0 0 ${boardW} ${boardH}`} preserveAspectRatio="xMidYMid meet">
-            {/* Board */}
+            {/* Board background */}
             <rect x={0} y={0} width={boardW} height={boardH} rx={8} fill="#1a5c2a" />
             {/* Board outline */}
             <rect x={4} y={4} width={boardW - 8} height={boardH - 8} rx={6} fill="none" stroke="#2d8a4e" strokeWidth={1.5} />
+            {/* Ground plane hatching */}
+            <defs>
+              <pattern id="pcb-hatch" width={12} height={12} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <line x1={0} y1={0} x2={0} y2={12} stroke="#1b6630" strokeWidth={0.5} />
+              </pattern>
+            </defs>
+            <rect x={6} y={6} width={boardW - 12} height={boardH - 12} rx={4} fill="url(#pcb-hatch)" opacity={0.4} />
 
-            {/* Traces (wires) */}
+            {/* Traces — rendered behind components */}
             {nets.map((net, i) => {
+              const color = NET_COLORS[net.netIdx % NET_COLORS.length];
+              // Route: horizontal from source, vertical, horizontal to dest (Z-shape)
               const midX = (net.from.x + net.to.x) / 2;
               return (
                 <path
                   key={`trace-${i}`}
                   d={`M ${net.from.x} ${net.from.y} L ${midX} ${net.from.y} L ${midX} ${net.to.y} L ${net.to.x} ${net.to.y}`}
-                  stroke="#c8a96e"
-                  strokeWidth={3.5}
+                  stroke={color}
+                  strokeWidth={2.5}
                   fill="none"
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  opacity={0.8}
+                  opacity={0.75}
                 />
               );
             })}
@@ -285,45 +329,82 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
               const isChip = def?.category === 'active';
               return (
                 <g key={item.comp.id}>
+                  {/* Courtyard (clearance area) */}
+                  <rect
+                    x={item.x - 6} y={item.y - 6}
+                    width={item.w + 12} height={item.h + 12}
+                    rx={4} fill="#1a5c2a" opacity={0.6}
+                  />
                   {/* Component body */}
                   <rect
                     x={item.x} y={item.y}
                     width={item.w} height={item.h}
-                    rx={isChip ? 3 : 4}
+                    rx={isChip ? 2 : 3}
                     fill={isChip ? '#1a1a1a' : '#2d2d2d'}
-                    stroke="#555"
-                    strokeWidth={1.5}
+                    stroke="#666"
+                    strokeWidth={1}
                   />
-                  {/* Reference designator */}
+                  {/* Chip notch */}
+                  {isChip && (
+                    <circle
+                      cx={item.x + 8} cy={item.y + 8}
+                      r={3} fill="none" stroke="#555" strokeWidth={0.8}
+                    />
+                  )}
+                  {/* Silkscreen: reference designator */}
                   <text
                     x={item.x + item.w / 2}
-                    y={item.y + item.h / 2 - 4}
+                    y={item.y + item.h / 2 - 3}
                     textAnchor="middle"
                     fill="#e2e8f0"
-                    fontSize={14}
-                    fontWeight="600"
+                    fontSize={11}
+                    fontWeight="700"
+                    fontFamily="monospace"
                     pointerEvents="none"
                   >
                     {item.ref}
                   </text>
-                  {/* Value */}
+                  {/* Silkscreen: value */}
                   <text
                     x={item.x + item.w / 2}
-                    y={item.y + item.h / 2 + 10}
+                    y={item.y + item.h / 2 + 9}
                     textAnchor="middle"
                     fill="#94a3b8"
-                    fontSize={10}
+                    fontSize={8}
+                    fontFamily="monospace"
                     pointerEvents="none"
                   >
-                    {def?.chipLabel ?? def?.label ?? ''}
+                    {getValueLabel(item.comp)}
                   </text>
-                  {/* Pads */}
-                  {item.pins.map((pin) => (
-                    <g key={pin.id}>
-                      <circle cx={pin.x} cy={pin.y} r={5} fill="#c8a96e" stroke="#8b7340" strokeWidth={1} />
-                      <circle cx={pin.x} cy={pin.y} r={2.5} fill="#1a5c2a" />
-                    </g>
-                  ))}
+                  {/* Pads with pin labels */}
+                  {item.pins.map((pin) => {
+                    const isLeft = pin.x < item.x + item.w / 2;
+                    return (
+                      <g key={pin.id}>
+                        <rect
+                          x={pin.x - 4} y={pin.y - 3}
+                          width={8} height={6}
+                          rx={1} fill="#c8a96e" stroke="#8b7340" strokeWidth={0.6}
+                        />
+                        <circle cx={pin.x} cy={pin.y} r={1.5} fill="#1a5c2a" />
+                        {/* Pin label (only for chips with > 2 pins) */}
+                        {(def?.pins.length ?? 0) > 4 && (
+                          <text
+                            x={isLeft ? pin.x - 7 : pin.x + 7}
+                            y={pin.y + 2.5}
+                            textAnchor={isLeft ? 'end' : 'start'}
+                            fill="#4ade80"
+                            fontSize={5}
+                            fontFamily="monospace"
+                            opacity={0.7}
+                            pointerEvents="none"
+                          >
+                            {pin.label}
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
                 </g>
               );
             })}
@@ -331,10 +412,22 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
             {/* Mounting holes */}
             {[[16, 16], [boardW - 16, 16], [16, boardH - 16], [boardW - 16, boardH - 16]].map(([cx, cy], i) => (
               <g key={`mh-${i}`}>
-                <circle cx={cx} cy={cy} r={8} fill="#2d8a4e" stroke="#1a5c2a" strokeWidth={1.5} />
-                <circle cx={cx} cy={cy} r={3.5} fill="#0f3a1a" />
+                <circle cx={cx} cy={cy} r={7} fill="#2d8a4e" stroke="#1a5c2a" strokeWidth={1.5} />
+                <circle cx={cx} cy={cy} r={3} fill="#0f3a1a" />
               </g>
             ))}
+
+            {/* Board title silkscreen */}
+            <text
+              x={boardW / 2} y={boardH - 14}
+              textAnchor="middle"
+              fill="#2d8a4e"
+              fontSize={8}
+              fontFamily="monospace"
+              fontWeight="600"
+            >
+              E101 PCB Rev A
+            </text>
           </svg>
         </div>
         <div className="modal-actions">

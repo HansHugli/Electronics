@@ -61,7 +61,7 @@ function App() {
   const [simRunning, setSimRunning] = useState(false);
   const [simTime, setSimTime] = useState(0);
   const [wiringFrom, setWiringFrom] = useState<{ componentId: string; pinId: string } | null>(null);
-  const [selectedComponentId, setSelectedComponentId] = useState<string | null>(null);
+  const [selectedComponentIds, setSelectedComponentIds] = useState<string[]>([]);
   const [selectedWireId, setSelectedWireId] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [circuitName, setCircuitName] = useState('untitled');
@@ -218,6 +218,13 @@ function App() {
     });
   }, []);
 
+  const handleMoveSelection = useCallback((moves: { id: string; position: Point }[]) => {
+    setComponents((prev) => prev.map((c) => {
+      const move = moves.find((m) => m.id === c.id);
+      return move ? { ...c, position: move.position } : c;
+    }));
+  }, []);
+
   const handleMoveEnd = useCallback(() => {
     if (dragStartPos.current) {
       dragStartPos.current = null;
@@ -229,28 +236,42 @@ function App() {
     }
   }, [wires, history]);
 
-  const handleSelectComponent = useCallback((id: string | null) => {
-    setSelectedComponentId(id);
+  const handleSelectComponent = useCallback((id: string | null, additive = false) => {
+    if (id === null) {
+      setSelectedComponentIds([]);
+    } else if (additive) {
+      setSelectedComponentIds((prev) =>
+        prev.includes(id) ? prev.filter((entry) => entry !== id) : [...prev, id]
+      );
+    } else {
+      setSelectedComponentIds([id]);
+    }
     if (id) setSelectedWireId(null);
   }, []);
 
   const handleSelectWire = useCallback((id: string | null) => {
     setSelectedWireId(id);
-    if (id) setSelectedComponentId(null);
+    if (id) setSelectedComponentIds([]);
   }, []);
 
-  const handleDeleteComponent = useCallback((id: string) => {
+  const handleDeleteComponents = useCallback((ids: string[]) => {
     setComponents((prev) => {
-      const next = prev.filter((c) => c.id !== id);
+      const next = prev.filter((c) => !ids.includes(c.id));
       setWires((prevWires) => {
-        const nextWires = prevWires.filter((w) => w.from.componentId !== id && w.to.componentId !== id);
+        const nextWires = prevWires.filter(
+          (w) => !ids.includes(w.from.componentId) && !ids.includes(w.to.componentId)
+        );
         history.push(next, nextWires);
         return nextWires;
       });
       return next;
     });
-    setSelectedComponentId((prev) => prev === id ? null : prev);
+    setSelectedComponentIds((prev) => prev.filter((entry) => !ids.includes(entry)));
   }, [history]);
+
+  const handleDeleteComponent = useCallback((id: string) => {
+    handleDeleteComponents([id]);
+  }, [handleDeleteComponents]);
 
   const handleDeleteWire = useCallback((id: string) => {
     setWires((prev) => {
@@ -326,7 +347,7 @@ function App() {
     setComponents([]);
     setWires([]);
     setWiringFrom(null);
-    setSelectedComponentId(null);
+    setSelectedComponentIds([]);
     setSelectedWireId(null);
     setCircuitName('untitled');
     setCurrentFilePath(undefined);
@@ -342,7 +363,7 @@ function App() {
   const loadCircuitState = useCallback((data: { components: PlacedComponent[]; wires: Wire[] }, name?: string, filePath?: string) => {
     setComponents(data.components);
     setWires(data.wires);
-    setSelectedComponentId(null);
+    setSelectedComponentIds([]);
     setWiringFrom(null);
     setSimRunning(false);
     setSimTime(0);
@@ -435,17 +456,17 @@ function App() {
         case 'open': handleLoad(); break;
         case 'undo': {
           const snap = history.undo();
-          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentId(null); setSelectedWireId(null); }
+          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentIds([]); setSelectedWireId(null); }
           break;
         }
         case 'redo': {
           const snap = history.redo();
-          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentId(null); setSelectedWireId(null); }
+          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentIds([]); setSelectedWireId(null); }
           break;
         }
         case 'copy': {
-          if (selectedComponentId) {
-            const comp = components.find((c) => c.id === selectedComponentId);
+          if (selectedComponentIds.length > 0) {
+            const comp = components.find((c) => c.id === selectedComponentIds[0]);
             if (comp) clipboard.current = comp;
           }
           break;
@@ -466,7 +487,7 @@ function App() {
                 history.push(next, wires);
                 return next;
               });
-              setSelectedComponentId(newComp.id);
+              setSelectedComponentIds([newComp.id]);
               clipboard.current = newComp;
             }
           }
@@ -474,7 +495,7 @@ function App() {
         }
       }
     };
-  }, [handleSave, handleLoad, history, selectedComponentId, components, wires]);
+  }, [handleSave, handleLoad, history, selectedComponentIds, components, wires]);
 
   // ---- Demo ---- //
 
@@ -530,7 +551,7 @@ function App() {
         if (snap) {
           setComponents(snap.components);
           setWires(snap.wires);
-          setSelectedComponentId(null);
+          setSelectedComponentIds([]);
           setSelectedWireId(null);
         }
         return;
@@ -542,15 +563,15 @@ function App() {
         if (snap) {
           setComponents(snap.components);
           setWires(snap.wires);
-          setSelectedComponentId(null);
+          setSelectedComponentIds([]);
           setSelectedWireId(null);
         }
         return;
       }
       // Copy
       if (ctrl && e.key === 'c' && !isInput) {
-        if (selectedComponentId) {
-          const comp = components.find((c) => c.id === selectedComponentId);
+        if (selectedComponentIds.length > 0) {
+          const comp = components.find((c) => c.id === selectedComponentIds[0]);
           if (comp) clipboard.current = comp;
         }
         return;
@@ -578,7 +599,7 @@ function App() {
             history.push(next, wires);
             return next;
           });
-          setSelectedComponentId(newComp.id);
+          setSelectedComponentIds([newComp.id]);
           // Update clipboard to point to new component for repeated paste
           clipboard.current = newComp;
         }
@@ -586,8 +607,8 @@ function App() {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (isInput) return;
-        if (selectedComponentId) {
-          handleDeleteComponent(selectedComponentId);
+        if (selectedComponentIds.length > 0) {
+          handleDeleteComponents(selectedComponentIds);
         }
         if (selectedWireId) {
           handleDeleteWire(selectedWireId);
@@ -596,17 +617,18 @@ function App() {
       }
       if (e.key === 'Escape') {
         setWiringFrom(null);
-        setSelectedComponentId(null);
+        setSelectedComponentIds([]);
         setSelectedWireId(null);
         setContextMenu(null);
         return;
       }
       if (e.key === 'r' || e.key === 'R') {
         if (isInput) return;
-        if (selectedComponentId) {
+        if (selectedComponentIds.length === 1) {
+          const selectedId = selectedComponentIds[0];
           setComponents((prev) => {
             const next = prev.map((c) =>
-              c.id === selectedComponentId
+              c.id === selectedId
                 ? { ...c, rotation: (c.rotation + 90) % 360 }
                 : c
             );
@@ -619,9 +641,9 @@ function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [handleSave, handleLoad, selectedComponentId, selectedWireId, handleDeleteComponent, handleDeleteWire, components, wires, history]);
+}, [handleSave, handleLoad, selectedComponentIds, selectedWireId, handleDeleteComponents, handleDeleteWire, components, wires, history]);
 
-  const selectedComponent = components.find((c) => c.id === selectedComponentId) ?? null;
+  const selectedComponent = components.find((c) => c.id === selectedComponentIds[0]) ?? null;
   const selectedWire = wires.find((w) => w.id === selectedWireId) ?? null;
 
   const handleWireColorChange = useCallback((wireId: string, color: string) => {
@@ -714,12 +736,13 @@ function App() {
             simRunning={simRunning}
             onDropComponent={handleDropComponent}
             onMoveComponent={handleMoveComponent}
+            onMoveSelection={handleMoveSelection}
             onMoveEnd={handleMoveEnd}
             onStartWire={handleStartWire}
             onEndWire={handleEndWire}
             wiringFrom={wiringFrom}
             onSelectComponent={handleSelectComponent}
-            selectedComponentId={selectedComponentId}
+            selectedComponentIds={selectedComponentIds}
             onSelectWire={handleSelectWire}
             selectedWireId={selectedWireId}
             onToggleSwitch={handleToggleSwitch}

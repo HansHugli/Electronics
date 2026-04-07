@@ -104,7 +104,7 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 
 ### Remaining
 - [ ] PCB layout improvements (trace overlap, better auto-placement)
-- [ ] Multi-select and group operations
+- [x] Multi-select and group operations
 - [ ] Wire routing refinements
 - [ ] Arduino sketch editor compile workflow polish
 

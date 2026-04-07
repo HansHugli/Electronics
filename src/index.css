@@ -790,16 +790,48 @@ textarea {
 /* ---- Sketch Editor ---- */
 
 .sketch-modal {
-  width: 560px;
+  width: 640px;
   max-height: 85vh;
 }
 
-.sketch-textarea {
-  width: 100%;
-  height: 300px;
-  background: #0f172a;
+.sketch-editor-wrap {
+  display: flex;
   border: 1px solid #334155;
   border-radius: 0.4rem;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.sketch-line-numbers {
+  background: #0c1222;
+  color: #475569;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  padding: 0.75rem 0.5rem;
+  text-align: right;
+  -webkit-user-select: none;
+  user-select: none;
+  min-width: 2.5rem;
+  border-right: 1px solid #1e293b;
+}
+
+.sketch-line-num {
+  height: 1.2em;
+  line-height: 1.2em;
+}
+
+.sketch-line-num.error {
+  color: #ef4444;
+  font-weight: 700;
+  background: #450a0a55;
+}
+
+.sketch-textarea {
+  flex: 1;
+  height: 320px;
+  background: #0f172a;
+  border: none;
   color: #e2e8f0;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 0.8rem;
@@ -808,11 +840,10 @@ textarea {
   resize: vertical;
   outline: none;
   tab-size: 2;
-  margin-bottom: 0.5rem;
 }
 
 .sketch-textarea:focus {
-  border-color: #475569;
+  background: #0f172a;
 }
 
 .sketch-message {
@@ -836,6 +867,60 @@ textarea {
 .sketch-message.success {
   background: #052e16;
   color: #86efac;
+}
+
+.sketch-errors {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 0.5rem;
+  border: 1px solid #334155;
+  border-radius: 0.3rem;
+  background: #0f172a;
+}
+
+.sketch-error-item {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.7rem;
+  font-family: monospace;
+  border-bottom: 1px solid #1e293b;
+}
+
+.sketch-error-item.error { color: #fca5a5; }
+.sketch-error-item.warning { color: #fde68a; }
+.sketch-error-item.note { color: #93c5fd; }
+
+.sketch-error-loc {
+  color: #64748b;
+  white-space: nowrap;
+  min-width: 5rem;
+}
+
+.sketch-error-level {
+  font-weight: 700;
+  text-transform: uppercase;
+  min-width: 3.5rem;
+}
+
+.sketch-error-text {
+  flex: 1;
+}
+
+.sketch-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #475569;
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 0.3rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .modal-field label {

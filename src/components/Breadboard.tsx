@@ -21,12 +21,13 @@ interface BreadboardProps {
   simRunning: boolean;
   onDropComponent: (type: string, position: Point) => void;
   onMoveComponent: (id: string, position: Point) => void;
+  onMoveSelection: (moves: { id: string; position: Point }[]) => void;
   onMoveEnd: () => void;
   onStartWire: (componentId: string, pinId: string) => void;
   onEndWire: (componentId: string, pinId: string) => void;
   wiringFrom: { componentId: string; pinId: string } | null;
-  onSelectComponent: (id: string | null) => void;
-  selectedComponentId: string | null;
+  onSelectComponent: (id: string | null, additive?: boolean) => void;
+  selectedComponentIds: string[];
   onSelectWire: (id: string | null) => void;
   selectedWireId: string | null;
   onToggleSwitch: (id: string) => void;
@@ -180,6 +181,25 @@ function getComponentRect(comp: PlacedComponent): Rect {
   return { x: comp.position.x, y: comp.position.y, w, h };
 }
 
+function componentsOverlap(a: PlacedComponent, b: PlacedComponent): boolean {
+  const defA = COMPONENT_DEFINITIONS[a.type];
+  const defB = COMPONENT_DEFINITIONS[b.type];
+  if (!defA || !defB) return false;
+  const isRotA = a.rotation === 90 || a.rotation === 270;
+  const isRotB = b.rotation === 90 || b.rotation === 270;
+  const aw = (isRotA ? defA.height : defA.width) * GRID_W;
+  const ah = (isRotA ? defA.width : defA.height) * GRID_H;
+  const bw = (isRotB ? defB.height : defB.width) * GRID_W;
+  const bh = (isRotB ? defB.width : defB.height) * GRID_H;
+  const margin = 2;
+  return (
+    a.position.x + margin < b.position.x + bw &&
+    a.position.x + aw > b.position.x + margin &&
+    a.position.y + margin < b.position.y + bh &&
+    a.position.y + ah > b.position.y + margin
+  );
+}
+
 function getPinSide(comp: PlacedComponent, pinId: string): 'left' | 'right' | 'top' | 'bottom' {
   const def = COMPONENT_DEFINITIONS[comp.type];
   const pin = def?.pins.find((p) => p.id === pinId);
@@ -305,11 +325,13 @@ function routeWire(
     (a.x + b.x) / 2,
     a.x - GRID_W, a.x + GRID_W,
     b.x - GRID_W, b.x + GRID_W,
+    (a.x + b.x) / 2 - GRID_W, (a.x + b.x) / 2 + GRID_W,
   ];
   const midYs = [
     (a.y + b.y) / 2,
     a.y - GRID_H, a.y + GRID_H,
     b.y - GRID_H, b.y + GRID_H,
+    (a.y + b.y) / 2 - GRID_H, (a.y + b.y) / 2 + GRID_H,
   ];
   for (const mx of midXs) {
     candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
@@ -318,16 +340,14 @@ function routeWire(
     candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
   }
 
-  // U-shapes going wide
-  const xOffsets = [GRID_W * 2, GRID_W * 3, -GRID_W * 2, -GRID_W * 3];
-  const yOffsets = [GRID_H * 2, GRID_H * 3, -GRID_H * 2, -GRID_H * 3];
-  for (const off of yOffsets) {
-    const my = Math.min(a.y, b.y) + off;
-    candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
-  }
-  for (const off of xOffsets) {
-    const mx = Math.min(a.x, b.x) + off;
-    candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
+  // U-shapes going wide (try progressively wider offsets)
+  for (let m = 2; m <= 5; m++) {
+    for (const sign of [1, -1]) {
+      const my = Math.min(a.y, b.y) + sign * GRID_H * m;
+      candidates.push([a, { x: a.x, y: my }, { x: b.x, y: my }, b]);
+      const mx = Math.min(a.x, b.x) + sign * GRID_W * m;
+      candidates.push([a, { x: mx, y: a.y }, { x: mx, y: b.y }, b]);
+    }
   }
 
   // Test each candidate with stubs attached
@@ -336,7 +356,19 @@ function routeWire(
     if (pathClear(full)) return full;
   }
 
-  // Fallback: L through stubs (may overlap but always works)
+  // Second-pass fallback: try jog offsets on the L-shape to avoid parallel overlap
+  for (let jog = 1; jog <= 4; jog++) {
+    for (const sign of [1, -1]) {
+      const jogX = a.x + sign * GRID_W * jog;
+      const fb1 = [from, a, { x: jogX, y: a.y }, { x: jogX, y: b.y }, b, to];
+      if (pathClear(fb1)) return fb1;
+      const jogY = b.y + sign * GRID_H * jog;
+      const fb2 = [from, a, { x: a.x, y: jogY }, { x: b.x, y: jogY }, b, to];
+      if (pathClear(fb2)) return fb2;
+    }
+  }
+
+  // Final fallback: L through stubs (may overlap but always produces a path)
   return [from, a, { x: a.x, y: b.y }, b, to];
 }
 
@@ -416,12 +448,13 @@ export default function Breadboard({
   simRunning,
   onDropComponent,
   onMoveComponent,
+  onMoveSelection,
   onMoveEnd,
   onStartWire,
   onEndWire,
   wiringFrom,
   onSelectComponent,
-  selectedComponentId,
+  selectedComponentIds,
   onSelectWire,
   selectedWireId,
   onToggleSwitch,
@@ -430,7 +463,15 @@ export default function Breadboard({
   onContextMenu,
 }: BreadboardProps) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const dragRef = useRef<{ id: string; offsetX: number; offsetY: number; type: string; rotation: number } | null>(null);
+  const dragRef = useRef<{
+    ids: string[];
+    draggedId: string;
+    offsetX: number;
+    offsetY: number;
+    type: string;
+    rotation: number;
+    originPositions: Record<string, Point>;
+  } | null>(null);
   const [mousePos, setMousePos] = useState<Point | null>(null);
   const [hoveredHole, setHoveredHole] = useState<string | null>(null); // "col,row"
 
@@ -545,21 +586,39 @@ export default function Breadboard({
     (e: React.MouseEvent, compId: string) => {
       // Don't select/drag if we're wiring
       if (wiringFrom) return;
-      onSelectComponent(compId);
+      const isSelected = selectedComponentIds.includes(compId);
+      const additive = e.ctrlKey || e.metaKey;
+      const nextSelectedIds = additive
+        ? isSelected
+          ? selectedComponentIds.filter((id) => id !== compId)
+          : [...selectedComponentIds, compId]
+        : [compId];
+
+      onSelectComponent(compId, additive);
       onSelectWire(null);
+
+      if (!nextSelectedIds.includes(compId)) return;
+
       const coords = getSVGCoords(e);
       const comp = components.find((c) => c.id === compId);
       if (comp) {
+        const originPositions: Record<string, Point> = {};
+        nextSelectedIds.forEach((id) => {
+          const selected = components.find((c) => c.id === id);
+          if (selected) originPositions[id] = { ...selected.position };
+        });
         dragRef.current = {
-          id: compId,
+          ids: nextSelectedIds,
+          draggedId: compId,
           offsetX: coords.x - comp.position.x,
           offsetY: coords.y - comp.position.y,
           type: comp.type,
           rotation: comp.rotation,
+          originPositions,
         };
       }
     },
-    [components, getSVGCoords, onSelectComponent, onSelectWire, wiringFrom]
+    [components, getSVGCoords, onSelectComponent, onSelectWire, wiringFrom, selectedComponentIds]
   );
 
   const handleMouseMove = useCallback(
@@ -584,14 +643,48 @@ export default function Breadboard({
         setMousePos(coords);
       }
       if (dragRef.current) {
+        const ref = dragRef.current;
         const pos = snapComponentToGrid(
-          coords.x - dragRef.current.offsetX,
-          coords.y - dragRef.current.offsetY,
-          dragRef.current.type,
-          dragRef.current.rotation,
+          coords.x - ref.offsetX,
+          coords.y - ref.offsetY,
+          ref.type,
+          ref.rotation,
         );
-        if (!isValidPlacement(dragRef.current.type, pos, dragRef.current.rotation)) return;
-        onMoveComponent(dragRef.current.id, pos);
+        if (!isValidPlacement(ref.type, pos, ref.rotation)) return;
+        const baseOrigin = ref.originPositions[ref.draggedId];
+        const delta = {
+          x: pos.x - baseOrigin.x,
+          y: pos.y - baseOrigin.y,
+        };
+
+        const groupIds = new Set(ref.ids);
+        const moves = ref.ids.map((id) => {
+          const origin = ref.originPositions[id];
+          return {
+            id,
+            position: {
+              x: origin.x + delta.x,
+              y: origin.y + delta.y,
+            },
+          };
+        });
+
+        const valid = moves.every(({ id, position }) => {
+          const comp = components.find((c) => c.id === id);
+          if (!comp) return false;
+          if (!isValidPlacement(comp.type, position, comp.rotation)) return false;
+          const candidate = { ...comp, position };
+          return !components.some(
+            (other) => !groupIds.has(other.id) && componentsOverlap(candidate, other)
+          );
+        });
+
+        if (!valid) return;
+        if (moves.length === 1) {
+          onMoveComponent(moves[0].id, moves[0].position);
+        } else {
+          onMoveSelection(moves);
+        }
       }
     },
     [getSVGCoords, onMoveComponent, wiringFrom, zoom]
@@ -1000,7 +1093,7 @@ export default function Breadboard({
         const def = COMPONENT_DEFINITIONS[comp.type];
         if (!def) return null;
         const { w, h } = getRenderedSize(def, comp.rotation);
-        const isSelected = comp.id === selectedComponentId;
+        const isSelected = selectedComponentIds.includes(comp.id);
         const ledColorMap: Record<string, string> = {
           red: '#ef4444', green: '#22c55e', blue: '#3b82f6', yellow: '#eab308',
           white: '#f1f5f9', orange: '#f97316', purple: '#a855f7',
