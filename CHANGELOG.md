@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.11](https://github.com/HansHugli/Electronics/compare/v0.1.10...v0.1.11) (2026-04-08)
+
+
+### Features
+
+* necklace demo circuit with direct-AVR LED matrix support ([8b934ec](https://github.com/HansHugli/Electronics/commit/8b934ec0f417880b6477fd3b603e720712d947d3))
+
 ## [0.1.10](https://github.com/HansHugli/Electronics/compare/v0.1.9...v0.1.10) (2026-04-08)
 
 
