@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.12](https://github.com/HansHugli/Electronics/compare/v0.1.11...v0.1.12) (2026-04-08)
+
+
+### Features
+
+* momentary pushbuttons and necklace demo polish ([14a5387](https://github.com/HansHugli/Electronics/commit/14a53877447d253692a9ae58c21aff9f6129d836))
+
 ## [0.1.11](https://github.com/HansHugli/Electronics/compare/v0.1.10...v0.1.11) (2026-04-08)
 
 
