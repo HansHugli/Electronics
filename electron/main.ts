@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { getSetupStatus, downloadCli, installCore, compileSketch } from './arduinoCli';
+import { streamChat, ChatMessage, CircuitContextMode } from './claudeChat';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -10,8 +11,17 @@ const isDev = !app.isPackaged;
 
 const CONFIG_FILE = path.join(app.getPath('userData'), 'e101-config.json');
 
+/**
+ * Persistent app config. The Anthropic API key lives here in the userData
+ * directory and never leaves the main process — the renderer can ask whether
+ * a key is configured (boolean) but never sees the value itself.
+ */
 interface AppConfig {
   dataFilePath: string;
+  apiKey?: string;
+  chatModel?: string;
+  sidebarWidth?: number;
+  circuitContextMode?: CircuitContextMode;
 }
 
 function getOneDrivePath(): string | null {
@@ -111,8 +121,91 @@ ipcMain.handle('load-circuit', async () => {
 });
 
 ipcMain.handle('get-config', () => {
-  return loadConfig();
+  // Strip the API key before sending the config to the renderer — the
+  // renderer only needs to know whether one is configured, not its value.
+  const cfg = loadConfig();
+  const { apiKey, ...safe } = cfg;
+  return { ...safe, hasApiKey: !!apiKey };
 });
+
+// ---- Claude Chat config ---- //
+//
+// The API key never leaves the main process. The renderer can set/clear it
+// and check whether one is configured, but cannot read it back.
+
+ipcMain.handle('chat-set-api-key', (_event, apiKey: string) => {
+  const cfg = loadConfig();
+  cfg.apiKey = apiKey.trim() || undefined;
+  saveConfig(cfg);
+  return { hasApiKey: !!cfg.apiKey };
+});
+
+ipcMain.handle('chat-clear-api-key', () => {
+  const cfg = loadConfig();
+  delete cfg.apiKey;
+  saveConfig(cfg);
+  return { hasApiKey: false };
+});
+
+ipcMain.handle('chat-set-model', (_event, model: string) => {
+  const cfg = loadConfig();
+  cfg.chatModel = model;
+  saveConfig(cfg);
+  return cfg.chatModel;
+});
+
+ipcMain.handle('chat-set-circuit-mode', (_event, mode: CircuitContextMode) => {
+  const cfg = loadConfig();
+  cfg.circuitContextMode = mode;
+  saveConfig(cfg);
+  return cfg.circuitContextMode;
+});
+
+ipcMain.handle('chat-set-sidebar-width', (_event, width: number) => {
+  const cfg = loadConfig();
+  cfg.sidebarWidth = Math.max(240, Math.min(720, Math.round(width)));
+  saveConfig(cfg);
+  return cfg.sidebarWidth;
+});
+
+// Streaming chat send. We don't return the result through invoke — instead
+// the main process pumps token deltas back via webContents.send so the
+// renderer can render them as they arrive. This handler resolves
+// immediately with an ack; completion is signalled via chat-stream-done.
+ipcMain.handle(
+  'chat-send',
+  async (
+    event,
+    payload: {
+      requestId: string;
+      messages: ChatMessage[];
+      circuitContext: string;
+      componentCatalog: string;
+    },
+  ) => {
+    const cfg = loadConfig();
+    if (!cfg.apiKey) {
+      event.sender.send('chat-stream-error', {
+        requestId: payload.requestId,
+        kind: 'no_key',
+        message: 'No Anthropic API key configured. Add one in Settings.',
+      });
+      return { started: false };
+    }
+    // Fire and forget — streamChat handles its own errors and pushes them
+    // back over IPC. Awaiting it here would block the invoke return, which
+    // we want to ack quickly so the UI can mark the request in-flight.
+    void streamChat(event.sender, {
+      apiKey: cfg.apiKey,
+      model: cfg.chatModel || 'claude-opus-4-6',
+      messages: payload.messages,
+      circuitContext: payload.circuitContext,
+      componentCatalog: payload.componentCatalog,
+      requestId: payload.requestId,
+    });
+    return { started: true };
+  },
+);
 
 // Save a named circuit to the circuits folder (used for bootstrapping demos)
 ipcMain.handle('save-demo', async (_event, name: string, data: string) => {

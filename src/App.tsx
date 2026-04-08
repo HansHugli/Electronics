@@ -10,6 +10,7 @@ import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import Breadboard from './components/Breadboard';
 import PropertiesPanel from './components/PropertiesPanel';
+import ChatPanel from './components/ChatPanel';
 import PowerConfigModal from './components/PowerConfigModal';
 import Oscilloscope, { useOscilloscope } from './components/Oscilloscope';
 import AboutDialog from './components/AboutDialog';
@@ -69,6 +70,9 @@ function App() {
   const [pendingPowerDrop, setPendingPowerDrop] = useState<Point | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(320);
+  const sidebarResizeStart = useRef<{ x: number; width: number } | null>(null);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
   const [showSketchEditor, setShowSketchEditor] = useState(false);
   const sketchTargetId = useRef<string | null>(null);
   const [serialVisible, setSerialVisible] = useState(false);
@@ -106,6 +110,48 @@ function App() {
     document.title = title;
     window.electronApi?.setTitle?.(title);
   }, [circuitName]);
+
+  // Restore saved sidebar width on mount.
+  useEffect(() => {
+    if (!window.electronApi?.getConfig) return;
+    window.electronApi.getConfig().then((cfg) => {
+      if (cfg.sidebarWidth) setSidebarWidth(cfg.sidebarWidth);
+    });
+  }, []);
+
+  // Sidebar drag-to-resize. We attach window listeners on mousedown so the
+  // user can drag past the handle without losing the gesture, and persist
+  // the final width to config on mouseup.
+  const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    sidebarResizeStart.current = { x: e.clientX, width: sidebarWidth };
+    setSidebarResizing(true);
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (!sidebarResizing) return;
+    const onMove = (e: MouseEvent) => {
+      if (!sidebarResizeStart.current) return;
+      // Sidebar is on the right, so dragging LEFT (negative dx) widens it.
+      const dx = e.clientX - sidebarResizeStart.current.x;
+      const next = Math.max(240, Math.min(720, sidebarResizeStart.current.width - dx));
+      setSidebarWidth(next);
+    };
+    const onUp = () => {
+      setSidebarResizing(false);
+      sidebarResizeStart.current = null;
+      // Persist the new width to config.
+      if (window.electronApi?.chatSetSidebarWidth) {
+        window.electronApi.chatSetSidebarWidth(sidebarWidth);
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [sidebarResizing, sidebarWidth]);
 
   // Simulation loop — simple setInterval with tick guard
   const simIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -799,28 +845,45 @@ function App() {
           simRunning={simRunning}
         />
       </div>
-      <PropertiesPanel
-        component={selectedComponent}
-        onPropertyChange={handlePropertyChange}
-        onRotate={(id) => {
-          setComponents((prev) => prev.map((c) =>
-            c.id === id ? { ...c, rotation: (c.rotation + 90) % 360 } : c
-          ));
+      <div
+        className="right-sidebar"
+        ref={(el) => {
+          if (el) el.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
         }}
-        selectedWire={selectedWire}
-        onWireColorChange={handleWireColorChange}
-        onProbe={selectedComponent ? () => {
-          scope.addProbe(selectedComponent.id);
-          setScopeVisible(true);
-        } : undefined}
-        isProbed={selectedComponent ? scope.probedIds.has(selectedComponent.id) : false}
-        onLoadHex={selectedComponent?.type === 'atmega328' ? () => handleLoadHex(selectedComponent.id) : undefined}
-        isHexLoaded={selectedComponent?.type === 'atmega328' ? simulator.current.isAVRLoaded(selectedComponent.id) : false}
-        onWriteSketch={selectedComponent?.type === 'atmega328' ? () => {
-          sketchTargetId.current = selectedComponent.id;
-          setShowSketchEditor(true);
-        } : undefined}
-      />
+      >
+        <div
+          className={`sidebar-resize-handle ${sidebarResizing ? 'dragging' : ''}`}
+          onMouseDown={handleSidebarResizeStart}
+        />
+        <PropertiesPanel
+          component={selectedComponent}
+          onPropertyChange={handlePropertyChange}
+          onRotate={(id) => {
+            setComponents((prev) => prev.map((c) =>
+              c.id === id ? { ...c, rotation: (c.rotation + 90) % 360 } : c
+            ));
+          }}
+          selectedWire={selectedWire}
+          onWireColorChange={handleWireColorChange}
+          onProbe={selectedComponent ? () => {
+            scope.addProbe(selectedComponent.id);
+            setScopeVisible(true);
+          } : undefined}
+          isProbed={selectedComponent ? scope.probedIds.has(selectedComponent.id) : false}
+          onLoadHex={selectedComponent?.type === 'atmega328' ? () => handleLoadHex(selectedComponent.id) : undefined}
+          isHexLoaded={selectedComponent?.type === 'atmega328' ? simulator.current.isAVRLoaded(selectedComponent.id) : false}
+          onWriteSketch={selectedComponent?.type === 'atmega328' ? () => {
+            sketchTargetId.current = selectedComponent.id;
+            setShowSketchEditor(true);
+          } : undefined}
+        />
+        <ChatPanel
+          components={components}
+          wires={wires}
+          selectedComponent={selectedComponent}
+          onOpenSettings={() => setShowSettings(true)}
+        />
+      </div>
 
       {pendingPowerDrop && (
         <PowerConfigModal
