@@ -52,6 +52,10 @@ export default function Toolbar({
           <span className="toolbar-btn-icon">███</span>
           <span className="toolbar-btn-label">Matrix</span>
         </button>
+        <button type="button" className="toolbar-btn" onClick={() => onLoadDemo('necklace')} title="Necklace Demo (direct-driven 5x7 matrix, text scroll)">
+          <span className="toolbar-btn-icon">♥♥♥</span>
+          <span className="toolbar-btn-label">Necklace</span>
+        </button>
         <div className="toolbar-separator" />
         <button type="button" className="toolbar-btn" onClick={onShowPCB} title="PCB layout preview">
           <span className="toolbar-btn-icon">PCB</span>

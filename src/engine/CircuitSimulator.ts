@@ -1281,121 +1281,137 @@ export class CircuitSimulator {
     //
     // The naive approach (sample voltages once at end-of-tick) only catches
     // whichever single row was active at the very end of the 100 ms tick, so
-    // a multiplexed display only ever shows 1/7 of its pattern. Sliding-window
-    // OR across multiple ticks helped, but at typical multiplex periods the
-    // end-of-tick phase doesn't walk through every row reliably either.
+    // a multiplexed display only ever shows 1/7 of its pattern. Instead we
+    // replay per-cycle pin activity across the whole tick and compute, for
+    // every (col, row) pair, whether the col anode was HIGH while the row
+    // cathode was LOW at any moment — the OR of those coincidences is the
+    // image the firmware intended to display, with no aliasing.
     //
-    // What we do instead: replay the AVR row-pin transitions for this tick,
-    // and at every cycle when a row pin is LOW we look up what columns the
-    // shift register was driving HIGH at that exact cycle (using the
-    // outputHistory recorded by the shift register pre-pass above). The OR of
-    // those (row × col) coincidences across the whole tick is the picture the
-    // firmware intended to display, with no aliasing.
+    // Column anodes can be driven two ways:
+    //   - directly by an AVR output pin (e.g. necklace.ino)
+    //   - by a 74HC595 Q output (e.g. matrix_demo.ino, test_led.ino), using
+    //     the per-tick outputHistory recorded by the shift register pre-pass
+    // Row cathodes are driven by AVR output pins in both cases.
     //
-    // For non-multiplexed sketches (e.g. test_led.ino, which holds one LED on
-    // for an entire pixel dwell with zero row toggles per tick) we fall back
-    // to the end-of-tick voltage sample.
+    // If a matrix has neither AVR nor shift-register drivers on any pin we
+    // fall back to a voltage sample — that covers static/test circuits where
+    // rails connect directly to the matrix without any active driver.
     const colBitOf: Record<string, number> = { qa: 0, qb: 1, qc: 2, qd: 3, qe: 4, qf: 5, qg: 6, qh: 7 };
+
+    // Build [start, end) intervals across this tick where an AVR pin is at
+    // the requested level (activeHigh=true for HIGH intervals, false for
+    // LOW). A pin with no transitions this tick produces a single infinite
+    // interval if its final state matches, else none.
+    const avrPinIntervals = (drv: AvrDriver | undefined, activeHigh: boolean): [number, number][] => {
+      if (!drv) return [];
+      const trans: { cycle: number; high: boolean }[] = [];
+      for (const t of drv.bridge.transitions) {
+        if (t.pinId === drv.pinId) trans.push({ cycle: t.cycle, high: t.high });
+      }
+      const finalIsHigh = avrFinalPins.get(drv.avrId)?.get(drv.pinId) === 'high';
+      // Level at the START of this tick: inverse of the first transition's
+      // target (since a transition reports the NEW level), or the final
+      // level if there were no transitions.
+      const startHigh = trans.length > 0 ? !trans[0].high : finalIsHigh;
+      let isActive = activeHigh ? startHigh : !startHigh;
+      const intervals: [number, number][] = [];
+      let start = 0;
+      for (const t of trans) {
+        const nowActive = activeHigh ? t.high : !t.high;
+        if (isActive && !nowActive) {
+          intervals.push([start, t.cycle]);
+          isActive = false;
+        } else if (!isActive && nowActive) {
+          start = t.cycle;
+          isActive = true;
+        }
+      }
+      if (isActive) intervals.push([start, Number.POSITIVE_INFINITY]);
+      return intervals;
+    };
+
+    const intervalsOverlap = (a: [number, number][], b: [number, number][]): boolean => {
+      for (const [as, ae] of a) {
+        for (const [bs, be] of b) {
+          if (ae > bs && as < be) return true;
+        }
+      }
+      return false;
+    };
+
     for (const comp of components) {
       if (comp.type === 'ledmatrix') {
         const leds: boolean[] = new Array(35).fill(false);
         const state = results.get(comp.id) ?? {};
 
-        // For each column, find the shift register Q output (if any) wired to it.
-        const colDrivers: ({ srId: string; bit: number } | null)[] = new Array(5).fill(null);
+        // HIGH intervals for each column anode (5 cols).
+        const colHigh: [number, number][][] = [];
+        let anyColDriver = false;
         for (let c = 0; c < 5; c++) {
           const cNode = getNode(comp.id, `c${c + 1}`);
+          // Shift-register-driven column?
+          let srMatch: { srId: string; bit: number } | null = null;
           for (const sr of components) {
             if (sr.type !== 'shift_register') continue;
             for (const qPin of Object.keys(colBitOf)) {
               if (getNode(sr.id, qPin) === cNode) {
-                colDrivers[c] = { srId: sr.id, bit: colBitOf[qPin] };
+                srMatch = { srId: sr.id, bit: colBitOf[qPin] };
                 break;
               }
             }
-            if (colDrivers[c]) break;
+            if (srMatch) break;
           }
-        }
-
-        // For each row pin, fetch its AVR driver and per-tick transition list.
-        type RowInfo = { drv?: AvrDriver; trans: { cycle: number; high: boolean }[]; startsLow: boolean; finalLow: boolean };
-        const rowInfos: RowInfo[] = [];
-        let rowEdgeTotal = 0;
-        for (let r = 0; r < 7; r++) {
-          const rNode = getNode(comp.id, `r${r + 1}`);
-          const drv = nodeToAvrDriver.get(rNode);
-          const trans: { cycle: number; high: boolean }[] = [];
-          if (drv) {
-            for (const t of drv.bridge.transitions) {
-              if (t.pinId === drv.pinId) trans.push({ cycle: t.cycle, high: t.high });
-            }
-          }
-          rowEdgeTotal += trans.length;
-          // The pin's level at the START of this tick is the inverse of its
-          // first recorded transition (if any), or its current end-of-tick
-          // level (if no transitions occurred). A transition with high=true
-          // means the pin went TO high — so just before, it was LOW, i.e.
-          // startsLow=true. (And vice versa.) So startsLow == trans[0].high.
-          const finalIsHigh = drv
-            ? avrFinalPins.get(drv.avrId)?.get(drv.pinId) === 'high'
-            : false;
-          let startsLow: boolean;
-          if (trans.length > 0) {
-            startsLow = trans[0].high;
-          } else {
-            startsLow = !finalIsHigh && drv !== undefined;
-          }
-          rowInfos.push({ drv, trans, startsLow, finalLow: !finalIsHigh });
-        }
-
-        if (rowEdgeTotal > 0) {
-          // Multiplexed path: walk transitions and OR in column bits at every
-          // moment a row was being driven LOW.
-          for (let r = 0; r < 7; r++) {
-            const info = rowInfos[r];
-            if (!info.drv) continue;
-            // Convert transition stream into LOW intervals [startCycle, endCycle).
-            const intervals: [number, number][] = [];
-            let isLow = info.startsLow;
-            let intervalStart = 0;
-            for (const t of info.trans) {
-              if (isLow && t.high) {
-                intervals.push([intervalStart, t.cycle]);
-                isLow = false;
-              } else if (!isLow && !t.high) {
-                intervalStart = t.cycle;
-                isLow = true;
-              }
-            }
-            if (isLow) intervals.push([intervalStart, Number.POSITIVE_INFINITY]);
-            if (intervals.length === 0) continue;
-
-            for (let c = 0; c < 5; c++) {
-              const drv = colDrivers[c];
-              if (!drv) continue;
-              const sr = this.state.shiftReg.get(drv.srId);
-              if (!sr || !sr.outputHistory || sr.outputHistory.length === 0) continue;
-              // Walk the shift register output history alongside the row's
-              // LOW intervals. If during any LOW interval the shift register
-              // had this column's bit set, the LED was lit.
-              let lit = false;
-              for (let i = 0; i < sr.outputHistory.length && !lit; i++) {
+          if (srMatch) {
+            anyColDriver = true;
+            const sr = this.state.shiftReg.get(srMatch.srId);
+            const ivs: [number, number][] = [];
+            if (sr && sr.outputHistory && sr.outputHistory.length > 0) {
+              for (let i = 0; i < sr.outputHistory.length; i++) {
                 const seg = sr.outputHistory[i];
+                if (((seg.output >> srMatch.bit) & 1) === 0) continue;
                 const segEnd = i + 1 < sr.outputHistory.length
                   ? sr.outputHistory[i + 1].cycle
                   : Number.POSITIVE_INFINITY;
-                if (((seg.output >> drv.bit) & 1) === 0) continue;
-                for (const [s, e] of intervals) {
-                  if (segEnd > s && seg.cycle < e) { lit = true; break; }
-                }
+                ivs.push([seg.cycle, segEnd]);
               }
-              if (lit) leds[c * 7 + r] = true;
+            }
+            colHigh.push(ivs);
+            continue;
+          }
+          // AVR-direct column?
+          const drv = nodeToAvrDriver.get(cNode);
+          if (drv) {
+            anyColDriver = true;
+            colHigh.push(avrPinIntervals(drv, true));
+          } else {
+            colHigh.push([]);
+          }
+        }
+
+        // LOW intervals for each row cathode (7 rows).
+        const rowLow: [number, number][][] = [];
+        let anyRowDriver = false;
+        for (let r = 0; r < 7; r++) {
+          const rNode = getNode(comp.id, `r${r + 1}`);
+          const drv = nodeToAvrDriver.get(rNode);
+          if (drv) anyRowDriver = true;
+          rowLow.push(avrPinIntervals(drv, false));
+        }
+
+        if (anyColDriver || anyRowDriver) {
+          // Replay path: works for both multiplexed and static drives.
+          for (let c = 0; c < 5; c++) {
+            if (colHigh[c].length === 0) continue;
+            for (let r = 0; r < 7; r++) {
+              if (rowLow[r].length === 0) continue;
+              if (intervalsOverlap(colHigh[c], rowLow[r])) {
+                leds[c * 7 + r] = true;
+              }
             }
           }
         } else {
-          // Static path: no row toggles this tick, so the end-of-tick voltage
-          // sample is meaningful. (Used by test_led.ino and similar sketches
-          // that don't multiplex.)
+          // Voltage-sample fallback: no AVR/SR drivers on this matrix, so
+          // just take an end-of-tick snapshot (static test circuits).
           for (let c = 0; c < 5; c++) {
             const vCol = nodeVoltage(getNode(comp.id, `c${c + 1}`));
             for (let r = 0; r < 7; r++) {
