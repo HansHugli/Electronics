@@ -292,6 +292,16 @@ function App() {
     );
   }, []);
 
+  const handleSetSwitchClosed = useCallback((id: string, closed: boolean) => {
+    setComponents((prev) =>
+      prev.map((c) =>
+        c.id === id && c.type === 'switch'
+          ? { ...c, state: { ...c.state, closed: closed ? 1 : 0 } }
+          : c
+      )
+    );
+  }, []);
+
   const handleStartWire = useCallback((componentId: string, pinId: string) => {
     if (!componentId) {
       // Cancel signal
@@ -756,6 +766,7 @@ function App() {
             onSelectWire={handleSelectWire}
             selectedWireId={selectedWireId}
             onToggleSwitch={handleToggleSwitch}
+            onSetSwitchClosed={handleSetSwitchClosed}
             wireCurrents={simulator.current.wireCurrents}
             pinHoleVoltages={simulator.current.pinHoleVoltages}
             onContextMenu={(e, compId, wireId) => {

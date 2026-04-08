@@ -35,6 +35,7 @@ interface BreadboardProps {
   onSelectWire: (id: string | null) => void;
   selectedWireId: string | null;
   onToggleSwitch: (id: string) => void;
+  onSetSwitchClosed: (id: string, closed: boolean) => void;
   wireCurrents: Map<string, number>;
   pinHoleVoltages: Map<string, number>;
   onContextMenu?: (e: React.MouseEvent, componentId?: string, wireId?: string) => void;
@@ -485,6 +486,7 @@ export default function Breadboard({
   onSelectWire,
   selectedWireId,
   onToggleSwitch,
+  onSetSwitchClosed,
   wireCurrents,
   pinHoleVoltages,
   onContextMenu,
@@ -1155,9 +1157,20 @@ export default function Breadboard({
               if (!wiringFrom) e.stopPropagation();
               if (comp.type === 'switch') {
                 e.stopPropagation();
-                onToggleSwitch(comp.id);
                 onSelectComponent(comp.id);
                 onSelectWire(null);
+                if (comp.properties?.momentary) {
+                  // Pushbutton: close on press, open on release. Listen on
+                  // window so dragging off the switch still releases it.
+                  onSetSwitchClosed(comp.id, true);
+                  const release = () => {
+                    onSetSwitchClosed(comp.id, false);
+                    window.removeEventListener('mouseup', release);
+                  };
+                  window.addEventListener('mouseup', release);
+                } else {
+                  onToggleSwitch(comp.id);
+                }
                 return;
               }
               handleComponentMouseDown(e, comp.id);
@@ -1537,8 +1550,12 @@ export default function Breadboard({
               />
             )}
 
-            {/* Generic DIP chip rendering for all IC category components */}
-            {def.category === 'active' && comp.type !== 'display7seg' && (() => {
+            {/* Generic DIP chip rendering for all IC category components.
+                ledmatrix is excluded — it has its own dedicated render path
+                above (which includes its own pin labels + run-mode-aware
+                chip label) and would otherwise get a duplicate label drawn
+                on top of the LED grid in run mode. */}
+            {def.category === 'active' && comp.type !== 'display7seg' && comp.type !== 'ledmatrix' && (() => {
               const leftPins = def.pins.filter((p) => p.side === 'left');
               const rightPins = def.pins.filter((p) => p.side === 'right');
               const totalPins = leftPins.length + rightPins.length;

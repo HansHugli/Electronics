@@ -823,7 +823,7 @@ export const AVR_NECKLACE_HEX = `:100000000C94A9010C94C6010C94C6010C94C60171
 :100D000090E0CDCE87E090E0CACE88E090E0C7CEFC
 :100D100089E090E0C4CE8AE090E0C1CE8BE090E024
 :100D2000BECE8CE090E0BBCE8DE090E0B8CE8EE001
-:100D300090E0B5CE8FE090E0B2CE6DE770E08CE051
+:100D300090E0B5CE8FE090E0B2CE63EA70E08CE058
 :100D400091E00E94D7020BCE64E170E084E291E072
 :100D5000F8CF6CE370E089E291E0F3CF6CE370E0F0
 :100D600080E391E0EECFE4E1F0E0F0933F01E09327
@@ -860,8 +860,10 @@ export const AVR_NECKLACE_HEX = `:100000000C94A9010C94C6010C94C6010C94C60171
  *   ROW_PINS = {A0..A4} = PC0..PC4 (anodes, source HIGH)  → matrix C1..C5
  *   COL_PINS = {2..8}   = PD2..PD7, PB0 (cathodes, sink LOW) → matrix R1..R7
  *
- * The sketch defaults to mode 20 (text scroll). Buttons are not wired —
- * the user can edit `mode` in necklace.ino and recompile to switch modes.
+ * The sketch defaults to mode 20 (text scroll). A momentary pushbutton
+ * is wired to BUTTON1 (D9 / PB1, with GND on the other side) — clicking
+ * it advances `mode` to the next animation. INPUT_PULLUP keeps PB1 HIGH
+ * while open; pressing pulls it LOW.
  */
 export function createNecklaceDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
   function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
@@ -890,6 +892,14 @@ export function createNecklaceDemoCircuit(): { components: PlacedComponent[]; wi
       position: chipPos(22, 22, 7), rotation: 0,
       properties: { color: 'red' },
       state: {},
+    },
+    // Momentary "Next mode" pushbutton: wired between PB1 (D9) and GND.
+    // Placed just above the matrix on board 1 right side.
+    {
+      id: 'btn1', type: 'switch',
+      position: { x: 96 + 20 * 24, y: 9 * 17 + 8.5 }, rotation: 0,
+      properties: { momentary: 1 },
+      state: { closed: 0 },
     },
   ];
 
@@ -938,6 +948,10 @@ export function createNecklaceDemoCircuit(): { components: PlacedComponent[]; wi
     // === Matrix Power ===
     { id: 'n40', from: bh(0, 15), to: { componentId: 'matrix1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
     { id: 'n41', from: bh(1, 15), to: { componentId: 'matrix1', pinId: 'gnd' }, waypoints: [], color: '#60a5fa' },
+
+    // === Next-mode pushbutton: PB1 (D9) ↔ GND ===
+    { id: 'n50', from: { componentId: 'btn1', pinId: 'a' }, to: { componentId: 'avr1', pinId: 'pb1' }, waypoints: [], color: '#fbbf24' },
+    { id: 'n51', from: { componentId: 'btn1', pinId: 'b' }, to: bh(1, 13), waypoints: [], color: '#60a5fa' },
   ];
 
   return { components, wires };

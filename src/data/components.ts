@@ -56,7 +56,7 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
   switch: {
     type: 'switch',
     label: 'Switch',
-    description: 'Click to toggle on/off. Connects or breaks a circuit.',
+    description: 'Click to toggle on/off. Connects or breaks a circuit. Set Momentary to 1 for a pushbutton (closed only while held).',
     icon: '/',
     category: 'input',
     width: 1,
@@ -66,7 +66,9 @@ export const COMPONENT_DEFINITIONS: Record<string, ComponentDefinition> = {
       { id: 'a', label: 'A', side: 'top', offset: 0.5, type: 'bidirectional' },
       { id: 'b', label: 'B', side: 'bottom', offset: 0.5, type: 'bidirectional' },
     ],
-    properties: {},
+    properties: {
+      momentary: { label: 'Momentary', default: 0 },
+    },
   },
   timer: {
     type: 'timer',

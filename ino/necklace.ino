@@ -334,7 +334,7 @@ void render_buffer() {
     case 17: render_character(13);                     break;
     case 18: render_character(14);                     break;
     case 19: render_character(15);                     break;
-    case 20: render_text("Happy Birthday Alex!   ", 125); break;
+    case 20: render_text("Happy Birthday Alex!   ", 163); break;
     case 21: render_text("-\\|/", 20);                 break;
     case 22: render_text("edc   ", 60);                break;
     case 23: render_text("EDC   ", 60);                break;
