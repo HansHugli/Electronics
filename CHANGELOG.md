@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.10](https://github.com/HansHugli/Electronics/compare/v0.1.9...v0.1.10) (2026-04-08)
+
+
+### Features
+
+* accurate multiplexed LED matrix rendering and sketch file workflow ([303b4a7](https://github.com/HansHugli/Electronics/commit/303b4a7c5c92f8a1d1477a56f8102e2a5c560626))
+
 ## [0.1.9](https://github.com/HansHugli/Electronics/compare/v0.1.8...v0.1.9) (2026-04-07)
 
 
