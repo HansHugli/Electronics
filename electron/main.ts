@@ -176,6 +176,38 @@ ipcMain.handle('arduino-compile', async (_event, sketchCode: string) => {
   }
 });
 
+// Open a native file picker for an .ino file. Returns the absolute path so
+// the renderer can later write the compiled .hex next to it.
+ipcMain.handle('arduino-open-sketch', async () => {
+  const win = BrowserWindow.getFocusedWindow();
+  if (!win) return null;
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Open Arduino Sketch',
+    filters: [{ name: 'Arduino Sketch', extensions: ['ino'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  const filePath = result.filePaths[0];
+  const data = fs.readFileSync(filePath, 'utf-8');
+  return { filePath, name: path.basename(filePath), data };
+});
+
+// Write a compiled hex string next to the source .ino — used to cache the
+// hex on disk so the user can later load it directly via "Load .hex" without
+// re-running the sketch editor compile flow.
+ipcMain.handle('arduino-save-hex', async (_event, sketchFilePath: string, hexContent: string) => {
+  try {
+    const dir = path.dirname(sketchFilePath);
+    const base = path.basename(sketchFilePath, path.extname(sketchFilePath));
+    const hexPath = path.join(dir, `${base}.hex`);
+    fs.writeFileSync(hexPath, hexContent, 'utf-8');
+    return { success: true, hexPath };
+  } catch (err: unknown) {
+    const e = err as { message?: string };
+    return { success: false, error: e.message || 'Failed to save hex' };
+  }
+});
+
 // ---- Chip Definitions ---- //
 
 function getChipsDir(): string {

@@ -1586,13 +1586,12 @@ export default function Breadboard({
                       {pin.label} {leftSorted.length + i + 1}
                     </text>
                   ))}
-                  {/* Chip name — short part number for the body. Hidden in
-                      run mode for a cleaner display. */}
-                  {!simRunning && (
-                    <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={fontSize + 1} fontWeight="600" pointerEvents="none">
-                      {def.chipLabel ?? def.label}
-                    </text>
-                  )}
+                  {/* Chip name — short part number for the body. Stays
+                      visible in run mode so you can still identify the part
+                      after pin labels are hidden. */}
+                  <text x={w / 2} y={h / 2 + 1} textAnchor="middle" fill="#e2e8f0" fontSize={fontSize + 1} fontWeight="600" pointerEvents="none">
+                    {def.chipLabel ?? def.label}
+                  </text>
                   {/* 555 Timer output indicator */}
                   {comp.type === 'timer' && (
                     <circle cx={w / 2} cy={h * 0.15} r={2} fill={isTimerHigh ? '#4ade80' : '#334155'} />

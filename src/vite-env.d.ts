@@ -18,6 +18,8 @@ interface ElectronApi {
   arduinoStatus: () => Promise<{ cliInstalled: boolean; coreInstalled: boolean }>;
   arduinoSetup: () => Promise<{ success: boolean; messages: string[] }>;
   arduinoCompile: (sketchCode: string) => Promise<{ success: boolean; hex?: string; output?: string; error?: string }>;
+  arduinoOpenSketch: () => Promise<{ filePath: string; name: string; data: string } | null>;
+  arduinoSaveHex: (sketchFilePath: string, hexContent: string) => Promise<{ success: boolean; hexPath?: string; error?: string }>;
   onMenuAction: (callback: (action: string) => void) => void;
 }
 

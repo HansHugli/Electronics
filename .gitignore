@@ -7,3 +7,4 @@ yarn-error.log*
 .env
 .vscode/
 coverage/
+/ino/necklace.c

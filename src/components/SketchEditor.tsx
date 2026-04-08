@@ -42,6 +42,9 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
   const [compileErrors, setCompileErrors] = useState<{ line: number; col: number; level: string; text: string }[]>([]);
   const [cliReady, setCliReady] = useState(false);
   const [setupProgress, setSetupProgress] = useState('');
+  /** Absolute path of the .ino file the user opened (if any). When set, a
+   *  successful compile will write the .hex next to it on disk. */
+  const [sketchFilePath, setSketchFilePath] = useState<string | null>(null);
   const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const sketchInputRef = useRef<HTMLInputElement | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -117,7 +120,18 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
       const result = await window.electronApi.arduinoCompile(code);
       if (result.success && result.hex) {
         setStatus('done');
-        setMessage('Compilation successful — hex loaded into simulator');
+        let msg = 'Compilation successful — hex loaded into simulator';
+        // If we know the source .ino path, also dump the hex next to it so
+        // the user can re-load it later via "Load .hex" without re-compiling.
+        if (sketchFilePath && window.electronApi.arduinoSaveHex) {
+          const saved = await window.electronApi.arduinoSaveHex(sketchFilePath, result.hex);
+          if (saved.success && saved.hexPath) {
+            msg = `Compilation successful — hex loaded and saved to ${saved.hexPath}`;
+          } else if (saved.error) {
+            msg = `Compiled and loaded, but couldn't save .hex: ${saved.error}`;
+          }
+        }
+        setMessage(msg);
         onCompiled(result.hex);
       } else {
         setStatus('error');
@@ -141,7 +155,21 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
     }
   };
 
-  const handleLoadSketchFile = () => {
+  const handleLoadSketchFile = async () => {
+    // Prefer the native Electron open dialog so we get the absolute file
+    // path (the browser <input type="file"> doesn't expose paths). The path
+    // lets us write the compiled .hex back next to the source .ino.
+    if (window.electronApi?.arduinoOpenSketch) {
+      const result = await window.electronApi.arduinoOpenSketch();
+      if (!result) return;
+      setCode(result.data);
+      setSketchFilePath(result.filePath);
+      setStatus('idle');
+      setMessage(`Loaded sketch "${result.name}"`);
+      setCompileErrors([]);
+      return;
+    }
+    // Browser fallback (no path tracking).
     sketchInputRef.current?.click();
   };
 
@@ -150,6 +178,7 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
     if (!file) return;
     const text = await file.text();
     setCode(text);
+    setSketchFilePath(null);
     setStatus('idle');
     setMessage(`Loaded sketch "${file.name}"`);
     setCompileErrors([]);
@@ -183,7 +212,7 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
             ref={textAreaRef}
             className="sketch-textarea"
             value={code}
-            onChange={(e) => { setCode(e.target.value); setCompileErrors([]); }}
+            onChange={(e) => { setCode(e.target.value); setCompileErrors([]); setSketchFilePath(null); }}
             onScroll={handleTextareaScroll}
             spellCheck={false}
             placeholder="Write your Arduino sketch here..."

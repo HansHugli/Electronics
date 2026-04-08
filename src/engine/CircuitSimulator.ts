@@ -78,7 +78,7 @@ interface PersistentState {
   ledMatrix: Map<string, boolean[]>;       // componentId -> 35 booleans (col-major: C1R1..C1R7, C2R1..C2R7, ...)
   ledMatrixHistory: Map<string, boolean[][]>; // componentId -> ring buffer of recent per-tick LED states (sliding-window OR)
   avrBridges: Map<string, AVRBridge>;     // componentId -> AVR bridge instance
-  shiftReg: Map<string, { bits: number; output: number; prevSrclk: boolean; prevRclk: boolean; prevSer: boolean; prevSrclr: boolean }>; // 74HC595
+  shiftReg: Map<string, { bits: number; output: number; prevSrclk: boolean; prevRclk: boolean; prevSer: boolean; prevSrclr: boolean; outputHistory: { cycle: number; output: number }[] }>; // 74HC595
   flipflop: Map<string, { q1: boolean; q2: boolean; prevClk1: boolean; prevClk2: boolean }>;      // 74HC74
 }
 
@@ -397,9 +397,13 @@ export class CircuitSimulator {
       if (!srclkDrv && !rclkDrv && !srclrDrv) continue;
 
       if (!this.state.shiftReg.has(comp.id)) {
-        this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false, prevSer: false, prevSrclr: true });
+        this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false, prevSer: false, prevSrclr: true, outputHistory: [] });
       }
       const sr = this.state.shiftReg.get(comp.id)!;
+
+      // Reset per-tick output history. The first entry records the output
+      // value at the start of this tick (carried over from the previous tick).
+      sr.outputHistory = [{ cycle: 0, output: sr.output }];
 
       // Build merged event stream
       const events = [
@@ -419,14 +423,18 @@ export class CircuitSimulator {
       const oeFinalState = oeDrv ? avrFinalPins.get(oeDrv.avrId)?.get(oeDrv.pinId) : undefined;
       const curOe = oeFinalState === 'high';
 
-      const apply = (next: { srclk: boolean; rclk: boolean; ser: boolean; srclr: boolean }) => {
+      const apply = (next: { srclk: boolean; rclk: boolean; ser: boolean; srclr: boolean }, cycle: number) => {
         if (!next.srclr) {
           sr.bits = 0;
         } else if (next.srclk && !curSrclk) {
           sr.bits = ((sr.bits << 1) | (next.ser ? 1 : 0)) & 0xFF;
         }
         if (next.rclk && !curRclk) {
-          sr.output = curOe ? 0 : sr.bits;
+          const newOut = curOe ? 0 : sr.bits;
+          if (newOut !== sr.output) {
+            sr.output = newOut;
+            sr.outputHistory.push({ cycle, output: sr.output });
+          }
         }
         curSrclk = next.srclk;
         curRclk = next.rclk;
@@ -437,7 +445,7 @@ export class CircuitSimulator {
       for (const ev of events) {
         const next = { srclk: curSrclk, rclk: curRclk, ser: curSer, srclr: curSrclr };
         (next as Record<string, boolean>)[ev.which] = ev.high;
-        apply(next);
+        apply(next, ev.cycle);
       }
 
       // Settle to final AVR-driven levels (non-AVR pins keep their cur values)
@@ -451,7 +459,10 @@ export class CircuitSimulator {
         ser: finalState(serDrv, curSer),
         srclr: srclrDrv ? finalState(srclrDrv, curSrclr) : true, // assume tied high if not AVR-driven
       };
-      apply(settled);
+      // Use a sentinel cycle past the last event so any final-state edge is
+      // recorded at the end of the tick.
+      const tickEndCycle = events.length > 0 ? events[events.length - 1].cycle + 1 : 0;
+      apply(settled, tickEndCycle);
 
       sr.prevSrclk = settled.srclk;
       sr.prevRclk = settled.rclk;
@@ -893,7 +904,7 @@ export class CircuitSimulator {
       if (comp.type === 'shift_register') {
         const nodeVcc = getNode(comp.id, 'vcc');
         if (!this.state.shiftReg.has(comp.id)) {
-          this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false, prevSer: false, prevSrclr: true });
+          this.state.shiftReg.set(comp.id, { bits: 0, output: 0, prevSrclk: false, prevRclk: false, prevSer: false, prevSrclr: true, outputHistory: [] });
         }
         const sr = this.state.shiftReg.get(comp.id)!;
         const outputPins = ['qa', 'qb', 'qc', 'qd', 'qe', 'qf', 'qg', 'qh'];
@@ -1266,49 +1277,138 @@ export class CircuitSimulator {
       }
     }
 
-    // LED Matrix: check which LEDs are lit
+    // LED Matrix: build the per-tick lit-LED bitmap.
+    //
+    // The naive approach (sample voltages once at end-of-tick) only catches
+    // whichever single row was active at the very end of the 100 ms tick, so
+    // a multiplexed display only ever shows 1/7 of its pattern. Sliding-window
+    // OR across multiple ticks helped, but at typical multiplex periods the
+    // end-of-tick phase doesn't walk through every row reliably either.
+    //
+    // What we do instead: replay the AVR row-pin transitions for this tick,
+    // and at every cycle when a row pin is LOW we look up what columns the
+    // shift register was driving HIGH at that exact cycle (using the
+    // outputHistory recorded by the shift register pre-pass above). The OR of
+    // those (row × col) coincidences across the whole tick is the picture the
+    // firmware intended to display, with no aliasing.
+    //
+    // For non-multiplexed sketches (e.g. test_led.ino, which holds one LED on
+    // for an entire pixel dwell with zero row toggles per tick) we fall back
+    // to the end-of-tick voltage sample.
+    const colBitOf: Record<string, number> = { qa: 0, qb: 1, qc: 2, qd: 3, qe: 4, qf: 5, qg: 6, qh: 7 };
     for (const comp of components) {
       if (comp.type === 'ledmatrix') {
         const leds: boolean[] = new Array(35).fill(false);
         const state = results.get(comp.id) ?? {};
 
-        // Sample which LEDs are physically conducting this tick.
+        // For each column, find the shift register Q output (if any) wired to it.
+        const colDrivers: ({ srId: string; bit: number } | null)[] = new Array(5).fill(null);
         for (let c = 0; c < 5; c++) {
-          const vCol = nodeVoltage(getNode(comp.id, `c${c + 1}`));
-          for (let r = 0; r < 7; r++) {
-            const vRow = nodeVoltage(getNode(comp.id, `r${r + 1}`));
-            const isOn = (vCol - vRow) > 1.5; // forward voltage threshold
-            leds[c * 7 + r] = isOn;
+          const cNode = getNode(comp.id, `c${c + 1}`);
+          for (const sr of components) {
+            if (sr.type !== 'shift_register') continue;
+            for (const qPin of Object.keys(colBitOf)) {
+              if (getNode(sr.id, qPin) === cNode) {
+                colDrivers[c] = { srId: sr.id, bit: colBitOf[qPin] };
+                break;
+              }
+            }
+            if (colDrivers[c]) break;
           }
         }
-        this.state.ledMatrix.set(comp.id, leds);
 
-        // Sliding-window OR: a multiplexed matrix only ever lights one row at
-        // a time, so any single tick captures only ~1/7 of the picture. We
-        // remember the last WINDOW_TICKS frames and OR them together to
-        // reconstruct the full pattern as a clean binary image. The window
-        // length is set to slightly more than one full firmware scan cycle
-        // (~11 ticks for the matrix demo) so a stable pattern lights every
-        // pixel it should. When the firmware switches patterns, the old one
-        // fully drains out of the window after WINDOW_TICKS and the new one
-        // takes over with no fade.
-        const WINDOW_TICKS = 14;
-        let history = this.state.ledMatrixHistory.get(comp.id);
-        if (!history) {
-          history = [];
-          this.state.ledMatrixHistory.set(comp.id, history);
+        // For each row pin, fetch its AVR driver and per-tick transition list.
+        type RowInfo = { drv?: AvrDriver; trans: { cycle: number; high: boolean }[]; startsLow: boolean; finalLow: boolean };
+        const rowInfos: RowInfo[] = [];
+        let rowEdgeTotal = 0;
+        for (let r = 0; r < 7; r++) {
+          const rNode = getNode(comp.id, `r${r + 1}`);
+          const drv = nodeToAvrDriver.get(rNode);
+          const trans: { cycle: number; high: boolean }[] = [];
+          if (drv) {
+            for (const t of drv.bridge.transitions) {
+              if (t.pinId === drv.pinId) trans.push({ cycle: t.cycle, high: t.high });
+            }
+          }
+          rowEdgeTotal += trans.length;
+          // The pin's level at the START of this tick is the inverse of its
+          // first recorded transition (if any), or its current end-of-tick
+          // level (if no transitions occurred). A transition with high=true
+          // means the pin went TO high — so just before, it was LOW, i.e.
+          // startsLow=true. (And vice versa.) So startsLow == trans[0].high.
+          const finalIsHigh = drv
+            ? avrFinalPins.get(drv.avrId)?.get(drv.pinId) === 'high'
+            : false;
+          let startsLow: boolean;
+          if (trans.length > 0) {
+            startsLow = trans[0].high;
+          } else {
+            startsLow = !finalIsHigh && drv !== undefined;
+          }
+          rowInfos.push({ drv, trans, startsLow, finalLow: !finalIsHigh });
         }
-        history.push(leds.slice());
-        while (history.length > WINDOW_TICKS) history.shift();
 
+        if (rowEdgeTotal > 0) {
+          // Multiplexed path: walk transitions and OR in column bits at every
+          // moment a row was being driven LOW.
+          for (let r = 0; r < 7; r++) {
+            const info = rowInfos[r];
+            if (!info.drv) continue;
+            // Convert transition stream into LOW intervals [startCycle, endCycle).
+            const intervals: [number, number][] = [];
+            let isLow = info.startsLow;
+            let intervalStart = 0;
+            for (const t of info.trans) {
+              if (isLow && t.high) {
+                intervals.push([intervalStart, t.cycle]);
+                isLow = false;
+              } else if (!isLow && !t.high) {
+                intervalStart = t.cycle;
+                isLow = true;
+              }
+            }
+            if (isLow) intervals.push([intervalStart, Number.POSITIVE_INFINITY]);
+            if (intervals.length === 0) continue;
+
+            for (let c = 0; c < 5; c++) {
+              const drv = colDrivers[c];
+              if (!drv) continue;
+              const sr = this.state.shiftReg.get(drv.srId);
+              if (!sr || !sr.outputHistory || sr.outputHistory.length === 0) continue;
+              // Walk the shift register output history alongside the row's
+              // LOW intervals. If during any LOW interval the shift register
+              // had this column's bit set, the LED was lit.
+              let lit = false;
+              for (let i = 0; i < sr.outputHistory.length && !lit; i++) {
+                const seg = sr.outputHistory[i];
+                const segEnd = i + 1 < sr.outputHistory.length
+                  ? sr.outputHistory[i + 1].cycle
+                  : Number.POSITIVE_INFINITY;
+                if (((seg.output >> drv.bit) & 1) === 0) continue;
+                for (const [s, e] of intervals) {
+                  if (segEnd > s && seg.cycle < e) { lit = true; break; }
+                }
+              }
+              if (lit) leds[c * 7 + r] = true;
+            }
+          }
+        } else {
+          // Static path: no row toggles this tick, so the end-of-tick voltage
+          // sample is meaningful. (Used by test_led.ino and similar sketches
+          // that don't multiplex.)
+          for (let c = 0; c < 5; c++) {
+            const vCol = nodeVoltage(getNode(comp.id, `c${c + 1}`));
+            for (let r = 0; r < 7; r++) {
+              const vRow = nodeVoltage(getNode(comp.id, `r${r + 1}`));
+              if ((vCol - vRow) > 1.5) leds[c * 7 + r] = true;
+            }
+          }
+        }
+
+        this.state.ledMatrix.set(comp.id, leds);
         for (let c = 0; c < 5; c++) {
           for (let r = 0; r < 7; r++) {
-            const idx = c * 7 + r;
-            let on = false;
-            for (const frame of history) {
-              if (frame[idx]) { on = true; break; }
-            }
-            state[`led_${c}_${r}`] = on ? 1 : 0;
+            state[`led_${c}_${r}`] = leds[c * 7 + r] ? 1 : 0;
           }
         }
         results.set(comp.id, state);

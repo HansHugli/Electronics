@@ -255,24 +255,30 @@ export default function PropertiesPanel({ component, onPropertyChange, onRotate,
           <span className="property-value">({component.position.x}, {component.position.y})</span>
         </div>
         {onLoadHex && (
-          <div className="prop-btn-row">
-            <button
-              type="button"
-              className={`prop-probe-btn ${isHexLoaded ? 'active' : ''}`}
-              onClick={onLoadHex}
-            >
-              {isHexLoaded ? 'Hex Loaded' : 'Load .hex'}
-            </button>
-            {onWriteSketch && (
+          <>
+            <div className="prop-btn-row">
               <button
                 type="button"
                 className="prop-probe-btn"
-                onClick={onWriteSketch}
+                onClick={onLoadHex}
               >
-                Write Sketch
+                Load Hex
               </button>
-            )}
-          </div>
+              {onWriteSketch && (
+                <button
+                  type="button"
+                  className="prop-probe-btn"
+                  onClick={onWriteSketch}
+                >
+                  Load Sketch
+                </button>
+              )}
+            </div>
+            <div className="property-row">
+              <label>Firmware</label>
+              <span className="property-value">{isHexLoaded ? 'Hex loaded' : 'No hex loaded'}</span>
+            </div>
+          </>
         )}
         {onProbe && (
           <button

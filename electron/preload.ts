@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('electronApi', {
   arduinoStatus: () => ipcRenderer.invoke('arduino-status'),
   arduinoSetup: () => ipcRenderer.invoke('arduino-setup'),
   arduinoCompile: (sketchCode: string) => ipcRenderer.invoke('arduino-compile', sketchCode),
+  arduinoOpenSketch: () => ipcRenderer.invoke('arduino-open-sketch'),
+  arduinoSaveHex: (sketchFilePath: string, hexContent: string) =>
+    ipcRenderer.invoke('arduino-save-hex', sketchFilePath, hexContent),
   onMenuAction: (callback: (action: string) => void) => {
     ipcRenderer.removeAllListeners('menu-action');
     ipcRenderer.on('menu-action', (_event, action: string) => callback(action));
