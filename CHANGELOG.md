@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.15](https://github.com/HansHugli/Electronics/compare/v0.1.14...v0.1.15) (2026-04-10)
+
+
+### Features
+
+* click-to-place, pin-aware grid snapping, component type management, and placement fixes ([64f018c](https://github.com/HansHugli/Electronics/commit/64f018cf0fe26890d8bbaa0e35e8c4a323e394e7))
+
 ## [0.1.14](https://github.com/HansHugli/Electronics/compare/v0.1.13...v0.1.14) (2026-04-10)
 
 
