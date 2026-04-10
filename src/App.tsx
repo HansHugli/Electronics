@@ -1,11 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { PlacedComponent, Wire, Point } from './types';
 import { COMPONENT_DEFINITIONS } from './data/components';
-import { GRID_W, GRID_H } from './data/breadboard';
+import { GRID_W, GRID_H, BOARD_X_OFFSET } from './data/breadboard';
 import { createBlinkDemoCircuit, createCounterDemoCircuit, createAVRBlinkDemoCircuit, createMatrixDemoCircuit, createNecklaceDemoCircuit, AVR_BLINK_HEX, AVR_MATRIX_HEX, AVR_NECKLACE_HEX } from './engine/simulation';
 import { CircuitSimulator } from './engine/CircuitSimulator';
 import { useHistory } from './hooks/useHistory';
-import { loadExternalChips } from './data/chipLoader';
+import { loadExternalChips, chipJSONToDefinition } from './data/chipLoader';
+import type { ChipDefinitionJSON } from './data/chipLoader';
 import Sidebar from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import Breadboard from './components/Breadboard';
@@ -89,13 +90,56 @@ function App() {
   const [scopeVisible, setScopeVisible] = useState(false);
   const scope = useOscilloscope();
 
-  // Load external chip definitions on mount
+  // Load external chip definitions on mount, then restore autosaved circuit
   useEffect(() => {
-    loadExternalChips().then((count) => {
+    loadExternalChips().then(async (count) => {
       if (count > 0) console.log(`Loaded ${count} external chip definition(s)`);
       setChipsLoaded(true);
+
+      // Restore autosaved circuit if available
+      if (window.electronApi?.loadAutosave) {
+        try {
+          const saved = await window.electronApi.loadAutosave();
+          if (saved?.data) {
+            const parsed = JSON.parse(saved.data);
+            if (parsed.components?.length > 0 || parsed.wires?.length > 0) {
+              setComponents(parsed.components || []);
+              setWires(parsed.wires || []);
+              if (parsed.circuitName) setCircuitName(parsed.circuitName);
+              // Reset ID counters to avoid collisions
+              const maxCompId = (parsed.components || []).reduce((max: number, c: PlacedComponent) => {
+                const num = parseInt(c.id.replace(/\D/g, ''), 10);
+                return isNaN(num) ? max : Math.max(max, num);
+              }, 0);
+              const maxWireId = (parsed.wires || []).reduce((max: number, w: Wire) => {
+                const num = parseInt(w.id.replace(/\D/g, ''), 10);
+                return isNaN(num) ? max : Math.max(max, num);
+              }, 0);
+              nextId = maxCompId + 1;
+              nextWireId = maxWireId + 1;
+              console.log(`Restored autosaved circuit (${parsed.components?.length} components, ${parsed.wires?.length} wires)`);
+            }
+          }
+        } catch {
+          // Ignore corrupt autosave
+        }
+      }
     });
   }, []);
+
+  // Autosave circuit state on every change (debounced to 1 second)
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!window.electronApi?.autosave) return;
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      const data = JSON.stringify({ components, wires, circuitName });
+      window.electronApi!.autosave(data).catch(() => {});
+    }, 1000);
+    return () => {
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    };
+  }, [components, wires, circuitName]);
 
   // Listen for menu actions from Electron — ref set up below after handlers are defined
   const menuActionRef = useRef<(action: string) => void>(() => {});
@@ -409,6 +453,252 @@ function App() {
     setCurrentFilePath(undefined);
     history.reset([], []);
   }, [history]);
+
+  // ---- AI Circuit Tool Executor ---- //
+  //
+  // Refs that always hold the latest state so the synchronous executor
+  // reads current values without needing to be re-created on every render.
+  const componentsRef = useRef(components);
+  componentsRef.current = components;
+  // wiresRef is already declared above for the simulation loop.
+
+  const handleExecuteToolCalls = useCallback(
+    (toolCalls: { id: string; name: string; input: Record<string, unknown> }[]) => {
+      const results: { id: string; result: { success: boolean; message: string; data?: Record<string, unknown> } }[] = [];
+
+      for (const tc of toolCalls) {
+        try {
+          const result = executeSingleTool(tc.name, tc.input);
+          results.push({ id: tc.id, result });
+        } catch (err) {
+          results.push({
+            id: tc.id,
+            result: { success: false, message: `Error: ${err instanceof Error ? err.message : String(err)}` },
+          });
+        }
+      }
+
+      // Push undo snapshot after all tool calls in the batch
+      history.push(componentsRef.current, wiresRef.current);
+      return results;
+
+      function executeSingleTool(
+        name: string,
+        input: Record<string, unknown>,
+      ): { success: boolean; message: string; data?: Record<string, unknown> } {
+        switch (name) {
+          case 'add_component': {
+            const type = input.type as string;
+            const col = input.col as number;
+            const row = input.row as number;
+            const props = (input.properties as Record<string, number | string> | undefined) ?? {};
+
+            const def = COMPONENT_DEFINITIONS[type];
+            if (!def) {
+              return { success: false, message: `Unknown component type "${type}". Check the catalog.` };
+            }
+
+            // Build default properties, then overlay any provided values
+            const defaults: Record<string, number | string> = {};
+            if (def.properties) {
+              for (const [key, prop] of Object.entries(def.properties)) {
+                defaults[key] = prop.default;
+              }
+            }
+            const mergedProps = { ...defaults, ...props };
+
+            const position = { x: BOARD_X_OFFSET + col * GRID_W, y: row * GRID_H };
+            const comp: PlacedComponent = {
+              id: genId(),
+              type,
+              position,
+              rotation: 0,
+              properties: mergedProps,
+              state: {},
+            };
+
+            // Check for overlap
+            if (componentsRef.current.some((c) => componentsOverlap(comp, c))) {
+              return { success: false, message: `Position (${col}, ${row}) would overlap an existing component. Try a different location.` };
+            }
+
+            const next = [...componentsRef.current, comp];
+            setComponents(next);
+            componentsRef.current = next;
+            return {
+              success: true,
+              message: `Added ${def.label} at (${col}, ${row})`,
+              data: { componentId: comp.id },
+            };
+          }
+
+          case 'add_wire': {
+            const from = input.from as { componentId: string; pinId: string };
+            const to = input.to as { componentId: string; pinId: string };
+            const color = (input.color as string) || WIRE_COLORS[wireColorIdx++ % WIRE_COLORS.length];
+
+            // Validate endpoints exist
+            for (const ep of [from, to]) {
+              if (ep.componentId !== 'board') {
+                const comp = componentsRef.current.find((c) => c.id === ep.componentId);
+                if (!comp) {
+                  return { success: false, message: `Component "${ep.componentId}" not found.` };
+                }
+                const def = COMPONENT_DEFINITIONS[comp.type];
+                if (def && !def.pins.some((p) => p.id === ep.pinId)) {
+                  return {
+                    success: false,
+                    message: `Pin "${ep.pinId}" not found on ${comp.type} (${comp.id}). Available pins: ${def.pins.map((p) => p.id).join(', ')}`,
+                  };
+                }
+              }
+            }
+
+            const wire: Wire = {
+              id: genWireId(),
+              from,
+              to,
+              waypoints: [],
+              color,
+            };
+            const nextWires = [...wiresRef.current, wire];
+            setWires(nextWires);
+            wiresRef.current = nextWires;
+            return {
+              success: true,
+              message: `Wired ${from.componentId}.${from.pinId} → ${to.componentId}.${to.pinId}`,
+              data: { wireId: wire.id },
+            };
+          }
+
+          case 'remove_component': {
+            const componentId = input.componentId as string;
+            const comp = componentsRef.current.find((c) => c.id === componentId);
+            if (!comp) {
+              return { success: false, message: `Component "${componentId}" not found.` };
+            }
+            const nextComps = componentsRef.current.filter((c) => c.id !== componentId);
+            const nextWires = wiresRef.current.filter(
+              (w) => w.from.componentId !== componentId && w.to.componentId !== componentId,
+            );
+            setComponents(nextComps);
+            setWires(nextWires);
+            componentsRef.current = nextComps;
+            wiresRef.current = nextWires;
+            return { success: true, message: `Removed ${comp.type} (${componentId}) and its wires.` };
+          }
+
+          case 'remove_wire': {
+            const wireId = input.wireId as string;
+            const wire = wiresRef.current.find((w) => w.id === wireId);
+            if (!wire) {
+              return { success: false, message: `Wire "${wireId}" not found.` };
+            }
+            const nextWires = wiresRef.current.filter((w) => w.id !== wireId);
+            setWires(nextWires);
+            wiresRef.current = nextWires;
+            return { success: true, message: `Removed wire ${wireId}.` };
+          }
+
+          case 'clear_circuit': {
+            setComponents([]);
+            setWires([]);
+            componentsRef.current = [];
+            wiresRef.current = [];
+            setSelectedComponentIds([]);
+            setWiringFrom(null);
+            return { success: true, message: 'Cleared all components and wires.' };
+          }
+
+          case 'list_components': {
+            const list = componentsRef.current.map((c) => ({
+              id: c.id,
+              type: c.type,
+              col: Math.round((c.position.x - BOARD_X_OFFSET) / GRID_W),
+              row: Math.round(c.position.y / GRID_H),
+              properties: c.properties,
+            }));
+            const wireList = wiresRef.current.map((w) => ({
+              id: w.id,
+              from: `${w.from.componentId}.${w.from.pinId}`,
+              to: `${w.to.componentId}.${w.to.pinId}`,
+            }));
+            return {
+              success: true,
+              message: `${list.length} components, ${wireList.length} wires on the board.`,
+              data: { components: list as unknown as Record<string, unknown>, wires: wireList as unknown as Record<string, unknown> },
+            };
+          }
+
+          case 'create_component_type': {
+            const typeId = input.type as string;
+            const label = input.label as string;
+            const description = (input.description as string) || `${label} component`;
+            const category = (input.category as string) || 'active';
+            const color = (input.color as string) || '#4a4a4a';
+            const inputPins = input.pins as { id: string; label: string; side: string; type: string }[];
+            const props = input.properties as Record<string, { label: string; default: number | string; unit?: string }> | undefined;
+
+            if (!typeId || !label || !inputPins || inputPins.length === 0) {
+              return { success: false, message: 'type, label, and at least one pin are required.' };
+            }
+
+            if (COMPONENT_DEFINITIONS[typeId]) {
+              return { success: false, message: `Component type "${typeId}" already exists. Use it directly with add_component.` };
+            }
+
+            // Build chip JSON and register it
+            const totalPins = inputPins.length;
+            const pinsPerSide = Math.ceil(totalPins / 2);
+            const chipJson: ChipDefinitionJSON = {
+              type: typeId,
+              label,
+              category,
+              behavior: 'passthrough',
+              color,
+              width: 2,
+              height: pinsPerSide,
+              pins: inputPins.map((p, i) => {
+                const sideCount = inputPins.filter((pp) => pp.side === p.side);
+                const sideIdx = sideCount.slice(0, sideCount.indexOf(p) + 1).length - 1;
+                const totalOnSide = sideCount.length;
+                return {
+                  id: p.id,
+                  label: p.label,
+                  side: p.side as 'left' | 'right',
+                  offset: totalOnSide === 1 ? 0.5 : (2 * (totalOnSide - 1 - sideIdx) + 1) / (2 * totalOnSide),
+                  type: p.type as 'power' | 'ground' | 'input' | 'output' | 'bidirectional',
+                  number: i + 1,
+                };
+              }),
+              properties: props,
+            };
+
+            const def = chipJSONToDefinition(chipJson);
+            def.description = description;
+            def.icon = label.slice(0, 2).toUpperCase();
+            def.chipLabel = label;
+            COMPONENT_DEFINITIONS[typeId] = def;
+
+            // Persist to disk so the component survives app restarts
+            if (window.electronApi?.saveChip) {
+              window.electronApi.saveChip(chipJson).catch(() => {});
+            }
+
+            return {
+              success: true,
+              message: `Created new component type "${typeId}" (${label}) with ${totalPins} pins. You can now place it with add_component.`,
+              data: { type: typeId, pins: inputPins.map((p) => p.id) },
+            };
+          }
+
+          default:
+            return { success: false, message: `Unknown tool "${name}".` };
+        }
+      }
+    },
+    [history],
+  );
 
   const showStatus = useCallback((msg: string) => {
     setSaveStatus(msg);
@@ -882,6 +1172,7 @@ function App() {
           wires={wires}
           selectedComponent={selectedComponent}
           onOpenSettings={() => setShowSettings(true)}
+          onExecuteToolCalls={handleExecuteToolCalls}
         />
       </div>
 

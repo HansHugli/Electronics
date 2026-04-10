@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { PlacedComponent, Wire } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
+
+interface ToolCallResult {
+  success: boolean;
+  message: string;
+  data?: Record<string, unknown>;
+}
 
 interface ChatPanelProps {
   components: PlacedComponent[];
@@ -8,6 +15,10 @@ interface ChatPanelProps {
   selectedComponent: PlacedComponent | null;
   /** Open the settings dialog (used by the empty-state CTA when no key is set). */
   onOpenSettings: () => void;
+  /** Execute circuit tool calls from the AI. Returns results for each tool call. */
+  onExecuteToolCalls: (
+    toolCalls: { id: string; name: string; input: Record<string, unknown> }[],
+  ) => { id: string; result: ToolCallResult }[];
 }
 
 interface ChatMessage {
@@ -83,31 +94,71 @@ function renderComponentCatalog(): string {
 
 const COMPONENT_CATALOG = renderComponentCatalog();
 
+type CircuitMode = 'always' | 'on-change' | 'never';
+
+const MODEL_OPTIONS: { id: string; label: string }[] = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'claude-opus-4-6', label: 'Opus 4.6' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+];
+
+/** Short display name for a model ID. */
+function modelShortName(modelId: string): string {
+  if (modelId.includes('opus')) return 'Opus';
+  if (modelId.includes('sonnet')) return 'Sonnet';
+  if (modelId.includes('haiku')) return 'Haiku';
+  return modelId;
+}
+
 export default function ChatPanel({
   components,
   wires,
   selectedComponent,
   onOpenSettings,
+  onExecuteToolCalls,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [circuitMode, setCircuitMode] = useState<'always' | 'on-change' | 'never'>('on-change');
+  const [model, setModel] = useState('claude-opus-4-6');
+  const [circuitMode, setCircuitMode] = useState<CircuitMode>('on-change');
   const [sending, setSending] = useState(false);
+  /** Status text shown while Claude is processing (thinking, building, etc.) */
+  const [processingStatus, setProcessingStatus] = useState<string | null>(null);
+  /** When model is "auto", this holds the model the backend actually chose for the current/last response. */
+  const [resolvedModel, setResolvedModel] = useState<string | null>(null);
   const lastSentHash = useRef<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Refresh config-derived state whenever the panel mounts. We re-fetch on
-  // each render of the parent? No — settings rarely change. Just on mount,
-  // and we'll add a refresh button if the user wants one later.
   useEffect(() => {
     if (!window.electronApi?.getConfig) return;
     window.electronApi.getConfig().then((cfg) => {
       setHasApiKey(!!cfg.hasApiKey);
+      if (cfg.chatModel) setModel(cfg.chatModel);
       if (cfg.circuitContextMode) setCircuitMode(cfg.circuitContextMode);
     });
   }, []);
+
+  const handleModelChange = async (m: string) => {
+    setModel(m);
+    if (window.electronApi?.chatSetModel) {
+      await window.electronApi.chatSetModel(m);
+    }
+  };
+
+  const handleCircuitModeChange = async (mode: CircuitMode) => {
+    setCircuitMode(mode);
+    if (window.electronApi?.chatSetCircuitMode) {
+      await window.electronApi.chatSetCircuitMode(mode);
+    }
+  };
+
+  // Keep a ref to the tool-call executor so the stream subscription
+  // (which runs in a long-lived useEffect) always calls the latest version.
+  const executeToolCallsRef = useRef(onExecuteToolCalls);
+  executeToolCallsRef.current = onExecuteToolCalls;
 
   // Wire up the streaming event subscription. The unsubscribe runs on
   // unmount so we don't double-handle events if the panel re-mounts.
@@ -116,6 +167,7 @@ export default function ChatPanel({
     const unsubscribe = window.electronApi.onChatStream({
       onToken: ({ requestId, delta }) => {
         if (requestId !== activeRequestId.current) return;
+        setProcessingStatus(null); // Clear status once tokens start arriving
         setMessages((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
@@ -125,8 +177,34 @@ export default function ChatPanel({
           return next;
         });
       },
+      onModel: ({ requestId, model: resolvedId }) => {
+        if (requestId !== activeRequestId.current) return;
+        setResolvedModel(resolvedId);
+      },
+      onToolCalls: ({ requestId, toolCalls }) => {
+        if (requestId !== activeRequestId.current) return;
+        // Show what Claude is doing
+        const toolNames = toolCalls.map((tc) => tc.name);
+        if (toolNames.some((n) => n === 'clear_circuit')) {
+          setProcessingStatus('Clearing circuit...');
+        } else if (toolNames.some((n) => n === 'create_component_type')) {
+          setProcessingStatus('Creating new component...');
+        } else if (toolNames.some((n) => n === 'add_component' || n === 'add_wire')) {
+          setProcessingStatus('Building circuit...');
+        } else if (toolNames.some((n) => n === 'remove_component' || n === 'remove_wire')) {
+          setProcessingStatus('Modifying circuit...');
+        } else {
+          setProcessingStatus('Working...');
+        }
+        // Execute tool calls synchronously on the circuit state and send results back.
+        const results = executeToolCallsRef.current(toolCalls);
+        if (window.electronApi?.chatSendToolResults) {
+          window.electronApi.chatSendToolResults(requestId, results);
+        }
+      },
       onDone: ({ requestId }) => {
         if (requestId !== activeRequestId.current) return;
+        setProcessingStatus(null);
         setMessages((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
@@ -140,6 +218,7 @@ export default function ChatPanel({
       },
       onError: ({ requestId, message }) => {
         if (requestId !== activeRequestId.current) return;
+        setProcessingStatus(null);
         setMessages((prev) => {
           // Replace the streaming placeholder with an error message.
           const next = [...prev];
@@ -205,6 +284,7 @@ export default function ChatPanel({
     setMessages(nextMessages);
     setInput('');
     setSending(true);
+    setProcessingStatus('Thinking...');
 
     // The full history we send to Claude excludes our streaming-placeholder
     // assistant message and any error messages (which the API doesn't
@@ -273,8 +353,21 @@ export default function ChatPanel({
               {m.role === 'user' ? 'You' : m.role === 'assistant' ? 'Claude' : 'Error'}
             </div>
             <div className="chat-msg-body">
-              {m.content || (m.streaming ? <span className="chat-cursor">▋</span> : null)}
-              {m.streaming && m.content ? <span className="chat-cursor">▋</span> : null}
+              {m.content ? (
+                <>
+                  <ReactMarkdown>{m.content}</ReactMarkdown>
+                  {m.streaming && !processingStatus && <span className="chat-cursor">▋</span>}
+                </>
+              ) : null}
+              {m.streaming && processingStatus && (
+                <div className="chat-processing">
+                  <span className="chat-processing-dot" />
+                  {processingStatus}
+                </div>
+              )}
+              {m.streaming && !m.content && !processingStatus && (
+                <span className="chat-cursor">▋</span>
+              )}
             </div>
           </div>
         ))}
@@ -304,6 +397,36 @@ export default function ChatPanel({
         >
           {sending ? '...' : 'Send'}
         </button>
+      </div>
+
+      <div className="chat-options-row">
+        <select
+          title="Model"
+          value={model}
+          onChange={(e) => handleModelChange(e.target.value)}
+          className="chat-option-select"
+        >
+          {MODEL_OPTIONS.map((opt) => (
+            <option key={opt.id} value={opt.id}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        {model === 'auto' && resolvedModel && (
+          <span className="chat-auto-badge" title="Model selected by Auto">
+            {modelShortName(resolvedModel)}
+          </span>
+        )}
+        <select
+          title="Circuit context"
+          value={circuitMode}
+          onChange={(e) => handleCircuitModeChange(e.target.value as CircuitMode)}
+          className="chat-option-select"
+        >
+          <option value="on-change">Circuit: on change</option>
+          <option value="always">Circuit: always</option>
+          <option value="never">Circuit: never</option>
+        </select>
       </div>
     </div>
   );

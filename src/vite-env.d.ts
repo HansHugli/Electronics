@@ -6,6 +6,11 @@ declare module 'intel-hex' {
 
 interface ChatStreamHandlers {
   onToken?: (e: { requestId: string; delta: string }) => void;
+  onModel?: (e: { requestId: string; model: string }) => void;
+  onToolCalls?: (e: {
+    requestId: string;
+    toolCalls: { id: string; name: string; input: Record<string, unknown> }[];
+  }) => void;
   onDone?: (e: {
     requestId: string;
     stopReason: string | null;
@@ -29,7 +34,10 @@ interface ElectronApi {
   loadCircuit: () => Promise<{ filePath: string; name: string; data: string } | null>;
   getConfig: () => Promise<AppConfigSafe>;
   loadChips: () => Promise<unknown[]>;
+  saveChip: (chipJson: unknown) => Promise<string>;
   loadHex: () => Promise<{ filePath: string; name: string; data: string } | null>;
+  autosave: (data: string) => Promise<string>;
+  loadAutosave: () => Promise<{ data: string } | null>;
   saveDemo: (name: string, data: string) => Promise<string>;
   loadNamedCircuit: (name: string) => Promise<{ filePath: string; name: string; data: string } | null>;
   setTitle: (title: string) => void;
@@ -52,6 +60,10 @@ interface ElectronApi {
     componentCatalog: string;
   }) => Promise<{ started: boolean }>;
   onChatStream: (handlers: ChatStreamHandlers) => () => void;
+  chatSendToolResults: (
+    requestId: string,
+    results: { id: string; result: { success: boolean; message: string; data?: Record<string, unknown> } }[],
+  ) => void;
 
   onMenuAction: (callback: (action: string) => void) => void;
 }

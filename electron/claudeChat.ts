@@ -1,16 +1,20 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { WebContents } from 'electron';
+import { ipcMain } from 'electron';
 
 /**
  * Claude chat IPC module.
  *
  * The renderer never holds the Anthropic API key. Chat messages flow:
  *   renderer → IPC → streamChat() → Anthropic API
- *                                       ↓ token deltas
+ *                                       ↓ token deltas + tool_use
  *   renderer ← IPC events ← streamChat()
  *
- * This way the key stays in the main process and can't leak via the
- * renderer's React DevTools, error reporters, etc.
+ * Tool-use loop:
+ *   Claude returns tool_use blocks → main sends them to the renderer via
+ *   'chat-stream-tool-call' → renderer executes them on circuit state and
+ *   replies via 'chat-tool-result' → main feeds tool results back to
+ *   Claude → Claude continues (may stream more text or more tool calls).
  */
 
 export type CircuitContextMode = 'always' | 'on-change' | 'never';
@@ -24,61 +28,330 @@ export interface StreamChatRequest {
   apiKey: string;
   model: string;
   messages: ChatMessage[];
-  /** Pre-rendered circuit JSON to include as a system reminder. Sent only
-   *  when the renderer determines the circuit has changed (or always/never,
-   *  per the user's setting). Empty string means "no circuit context this
-   *  turn." */
   circuitContext: string;
-  /** Stable component-catalog string that lists every component the
-   *  simulator knows about. This is cached via prompt caching since it
-   *  changes only across app versions, not per request. */
   componentCatalog: string;
-  /** Renderer-side request ID, echoed in stream events so the renderer can
-   *  route concurrent streams (we only ever expect one at a time, but the
-   *  ID also lets the UI ignore tokens from a cancelled prior request). */
   requestId: string;
 }
+
+/** A single circuit-manipulation action for the renderer to execute. */
+export interface CircuitAction {
+  tool: string;
+  input: Record<string, unknown>;
+}
+
+/** Result from the renderer after executing a circuit action. */
+export interface CircuitActionResult {
+  success: boolean;
+  message: string;
+  data?: Record<string, unknown>;
+}
+
+// ---- Tool Definitions ---- //
+
+const CIRCUIT_TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'add_component',
+    description: `Add a component to the breadboard at a specific grid position.
+
+Grid coordinates:
+- col: 0-30 (breadboard column). Board 1 spans cols 0-14, board 2 spans cols 16-30. Col 15 is the gap between boards.
+  Within each board: cols 0-1 are power rails, cols 2-6 are left component area, col 7 is the center gap (for DIP chips to straddle), cols 8-12 are right component area, cols 13-14 are power rails.
+  For board 2, add 16 to these values.
+- row: 0-49 (breadboard row, top to bottom)
+
+The component's top-left pin lands on (col, row). Multi-pin components extend rightward and downward.
+DIP chips should be placed so they straddle the center gap (col 7 for board 1, col 23 for board 2) — place them at col 6 or col 5 depending on width.
+
+Power supplies are special — they go in the supply area to the left of the board (use col -4 to -1, or just use col 0 and row 0-10 area).
+
+Returns the component ID assigned to the new component.`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          description: 'Component type ID from the catalog (e.g. "resistor", "led", "timer", "atmega328")',
+        },
+        col: {
+          type: 'number',
+          description: 'Grid column (0-30)',
+        },
+        row: {
+          type: 'number',
+          description: 'Grid row (0-49)',
+        },
+        properties: {
+          type: 'object',
+          description: 'Optional component properties (e.g. {"resistance": 1000} for a resistor, {"voltage": 5, "mode": "dc", "waveform": "square"} for power)',
+          additionalProperties: true,
+        },
+      },
+      required: ['type', 'col', 'row'],
+    },
+  },
+  {
+    name: 'add_wire',
+    description: `Connect two pins with a wire. Each endpoint is specified as either:
+- A component pin: { componentId: "comp_1", pinId: "anode" }
+- A bare breadboard hole: { componentId: "board", pinId: "col,row" } where col and row are grid coordinates
+
+Pin IDs vary by component type. Common examples:
+- Resistor: "lead1", "lead2"
+- LED: "anode", "cathode"
+- Capacitor: "pos", "neg"
+- Switch: "a", "b"
+- 555 Timer: "gnd", "trigger", "output", "reset", "control", "threshold", "discharge", "vcc"
+- Power supply: "pos", "neg"
+- ATmega328P: pin names like "pd0" through "pd7", "pb0" through "pb5", "pc0" through "pc5", "vcc", "gnd", etc.
+
+Use bare board holes to connect to power rails or to route through the breadboard's internal wiring.`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        from: {
+          type: 'object',
+          properties: {
+            componentId: { type: 'string' },
+            pinId: { type: 'string' },
+          },
+          required: ['componentId', 'pinId'],
+        },
+        to: {
+          type: 'object',
+          properties: {
+            componentId: { type: 'string' },
+            pinId: { type: 'string' },
+          },
+          required: ['componentId', 'pinId'],
+        },
+        color: {
+          type: 'string',
+          description: 'Optional wire color (e.g. "#e74c3c" for red, "#2ecc71" for green). Defaults to auto-cycling colors.',
+        },
+      },
+      required: ['from', 'to'],
+    },
+  },
+  {
+    name: 'remove_component',
+    description: 'Remove a component from the breadboard by its ID. Also removes all wires connected to it.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        componentId: {
+          type: 'string',
+          description: 'The component ID to remove (e.g. "comp_1")',
+        },
+      },
+      required: ['componentId'],
+    },
+  },
+  {
+    name: 'remove_wire',
+    description: 'Remove a wire by its ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        wireId: {
+          type: 'string',
+          description: 'The wire ID to remove (e.g. "wire_1")',
+        },
+      },
+      required: ['wireId'],
+    },
+  },
+  {
+    name: 'clear_circuit',
+    description: 'Remove all components and wires from the breadboard. Use this before building a new circuit from scratch.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'list_components',
+    description: 'List all components currently on the breadboard with their IDs, types, positions, and properties. Useful to check the current state before making changes.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'create_component_type',
+    description: `Create a new component type that doesn't exist in the catalog. Use this when the user asks for a component not in the catalog (e.g. a Geiger-Müller tube, a relay, a sensor, etc.). The new type is registered immediately and can then be placed with add_component.
+
+The component is rendered as a DIP-style chip on the breadboard with labeled pins. It uses "passthrough" behavior (visual only — no simulation model), but the circuit can still be wired and demonstrated structurally.
+
+After creating a new type, immediately use add_component to place it on the board.`,
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          description: 'Unique type ID for the new component (e.g. "geiger_tube", "relay_spdt"). Use lowercase with underscores.',
+        },
+        label: {
+          type: 'string',
+          description: 'Short display label for the chip body (e.g. "GM Tube", "Relay")',
+        },
+        description: {
+          type: 'string',
+          description: 'One-line description for the sidebar (e.g. "Geiger-Müller radiation detector tube")',
+        },
+        category: {
+          type: 'string',
+          enum: ['passive', 'active', 'input', 'output', 'measurement', 'power'],
+          description: 'Component category for the sidebar',
+        },
+        pins: {
+          type: 'array',
+          description: 'Pin definitions. For a DIP package, put half the pins on "left" and half on "right".',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Pin ID used in wiring (e.g. "anode", "clk", "vcc")' },
+              label: { type: 'string', description: 'Display label on the pin (e.g. "ANO", "CLK", "VCC")' },
+              side: { type: 'string', enum: ['left', 'right'], description: 'Which side of the chip' },
+              type: { type: 'string', enum: ['power', 'ground', 'input', 'output', 'bidirectional'], description: 'Pin type' },
+            },
+            required: ['id', 'label', 'side', 'type'],
+          },
+        },
+        color: {
+          type: 'string',
+          description: 'Chip body color as a hex string (e.g. "#4a4a4a"). Defaults to dark gray.',
+        },
+        properties: {
+          type: 'object',
+          description: 'Optional editable properties (e.g. {"voltage": {"label": "HV Output", "default": 400, "unit": "V"}})',
+          additionalProperties: true,
+        },
+      },
+      required: ['type', 'label', 'pins'],
+    },
+  },
+];
+
+// ---- System Prompt ---- //
 
 const SYSTEM_PROMPT = `You are an electronics tutor and assistant embedded in the e101 visual circuit simulator. The user is building circuits by placing components on a virtual breadboard and wiring them together, then running a simulation to see what happens.
 
 Your job is to help them:
 - Understand how their current circuit works (or doesn't)
 - Debug problems ("why isn't my LED lighting up?")
-- Suggest components and wiring for what they're trying to build
+- Build circuits for them when they ask ("build me a 555 blink circuit")
+- Modify or extend their existing circuits
 - Explain electronics concepts at the level the user seems to be at
+
+CRITICAL RULES — YOU MUST FOLLOW THESE:
+
+1. ALWAYS USE YOUR TOOLS. When the user asks you to build, create, add, wire, set up, or modify a circuit — you MUST call add_component, add_wire, etc. to build it directly. NEVER describe wiring steps for the user to follow. NEVER say "drag", "place", or "wire X to Y" as instructions. YOU do it by calling your tools. No exceptions.
+
+2. NEVER REFUSE TO BUILD. If the user asks for a component that isn't in the catalog, use create_component_type to invent it. You can create ANY component — sensors, tubes, relays, motors, displays, connectors, anything. Create it with appropriate pins, then place it with add_component and wire it up. The component won't simulate electrically (it uses passthrough behavior), but it will appear on the board with labeled pins and correct wiring. This is valuable for learning, prototyping, and PCB export.
+
+3. BUILD FIRST, EXPLAIN AFTER. When asked to build a circuit, immediately start calling tools. After the circuit is built, write a brief summary of what you placed and how it works. Do not ask permission or present options before building — just build it. If the user doesn't like it, they'll tell you.
 
 Guidelines:
 - Be concise. Most answers should fit in 1–4 short paragraphs. The chat panel is narrow.
 - When the user shares their circuit, refer to specific component IDs and pin names from the JSON.
-- Only suggest components from the catalog below. Do NOT invent component types — if the simulator doesn't have something, say so and suggest the closest available alternative.
-- For wiring suggestions, name the exact pins to connect (e.g., "wire avr1.pd2 to led1.anode").
+- Use components from the catalog below when available. When a component doesn't exist, create it with create_component_type.
+- When building circuits, place components with enough spacing so they don't overlap. DIP chips straddle the center gap (col 7).
+- After placing components and wiring them, give a brief summary of what you built and suggest the user click Run to test it.
 - If you don't have enough information, ask one focused question rather than guessing.
 - For Arduino/AVR sketches, the user can edit and recompile via the Sketch Editor — you can suggest sketch changes as code blocks.
+- When wiring to power rails, use bare board holes: { componentId: "board", pinId: "col,row" }. Power rails are cols 0-1 (left) and 13-14 (right) on each board.
+- Connect component pins to the breadboard by wiring them to board holes in the same row/strip, letting the breadboard's internal wiring make the connection.
 
 Available component catalog (id → label):
 {COMPONENT_CATALOG}`;
 
+// ---- Auto Model Selection ---- //
+
+function autoSelectModel(
+  userMessage: string,
+  conversationLength: number,
+  hasCircuitContext: boolean,
+): string {
+  const msg = userMessage.toLowerCase();
+  const wordCount = userMessage.split(/\s+/).length;
+
+  const complexPatterns = [
+    /\bdesign\b/, /\bbuild\b/, /\bcreate\b/, /\bmake\s+(me\s+)?a\b/,
+    /\bset\s+up\b/, /\bwire\s+up\b/, /\bput\s+together\b/,
+    /\badd\s+(a|an|the|some)\b/, /\bplace\s+(a|an|the)\b/,
+    /\bdebug\b/, /\btroubleshoot\b/, /\bdiagnos/,
+    /\boptimi[sz]e\b/, /\brefactor\b/, /\brewrite\b/,
+    /\bcompare\b.*\bvs\b/, /\btrade.?off/,
+    /\bexplain\s+(in\s+detail|how|why)\b.*\b(circuit|simulation|engine)\b/,
+    /\bpcb\b.*\blayout\b/, /\bschematic\b/,
+    /\bwrite\s+(me\s+)?(a\s+)?(sketch|code|program)\b/,
+    /\bstep.by.step\b/,
+    /\bcircuit\b/, /\bcounter\b/, /\btimer\b/, /\boscillator\b/, /\bamplifier\b/,
+  ];
+  const isComplex = complexPatterns.some((p) => p.test(msg));
+  const isLongConversation = conversationLength >= 10;
+  const isLongMessage = wordCount > 60;
+
+  if (isComplex || (isLongConversation && hasCircuitContext) || isLongMessage) {
+    return 'claude-opus-4-6';
+  }
+
+  const simplePatterns = [
+    /^(hi|hello|hey|thanks|thank you|ok|okay|got it|cool|nice)\b/,
+    /^what\s+(is|are)\s+(a|an|the)\s+\w+\??$/,
+    /^(how\s+many|which|where)\b.{0,40}\??$/,
+    /^(yes|no|yep|nope|sure)\b/,
+  ];
+  const isSimple = simplePatterns.some((p) => p.test(msg));
+  const isShort = wordCount <= 8;
+
+  if (isSimple && isShort && !hasCircuitContext) {
+    return 'claude-haiku-4-5';
+  }
+
+  return 'claude-sonnet-4-6';
+}
+
+// ---- Tool Result IPC ---- //
+
 /**
- * Run a streaming chat request and pump events back to the renderer over
- * IPC. Resolves when the stream completes (success or error). The renderer
- * subscribes to `chat-stream-token`, `chat-stream-done`, `chat-stream-error`.
+ * Wait for the renderer to execute a batch of tool calls and return results.
+ * We send the tool calls over IPC and set up a one-shot listener for the reply.
  */
+function executeToolCalls(
+  webContents: WebContents,
+  requestId: string,
+  toolCalls: { id: string; name: string; input: Record<string, unknown> }[],
+): Promise<{ id: string; result: CircuitActionResult }[]> {
+  return new Promise((resolve) => {
+    const channel = `chat-tool-result-${requestId}`;
+    ipcMain.once(channel, (_event, results: { id: string; result: CircuitActionResult }[]) => {
+      resolve(results);
+    });
+    webContents.send('chat-stream-tool-calls', { requestId, toolCalls });
+  });
+}
+
+// ---- Main Stream Function ---- //
+
 export async function streamChat(
   webContents: WebContents,
   req: StreamChatRequest,
 ): Promise<void> {
-  const { apiKey, model, messages, circuitContext, componentCatalog, requestId } = req;
+  const { apiKey, messages, circuitContext, componentCatalog, requestId } = req;
 
-  // Build the system prompt with the (stable) catalog interpolated. The
-  // entire system block is marked cacheable — across a chat session this is
-  // identical every turn, so after the first request it costs ~10% of input
-  // price.
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+  const model =
+    req.model === 'auto'
+      ? autoSelectModel(lastUserMsg?.content ?? '', messages.length, !!circuitContext)
+      : req.model;
+
   const systemText = SYSTEM_PROMPT.replace('{COMPONENT_CATALOG}', componentCatalog);
 
-  // Map our flat ChatMessage history into the SDK's MessageParam shape. The
-  // current circuit (if any) is appended as a system-reminder block tacked
-  // onto the LATEST user message — never interpolated into the system
-  // prompt itself, which would invalidate the cache prefix every turn.
+  // Build the initial message list. Circuit context is appended to the last
+  // user message (not the system prompt) to preserve cache stability.
   const apiMessages: Anthropic.MessageParam[] = messages.map((m, i) => {
     if (i === messages.length - 1 && m.role === 'user' && circuitContext) {
       return {
@@ -97,41 +370,103 @@ export async function streamChat(
 
   const client = new Anthropic({ apiKey });
 
+  if (webContents.isDestroyed()) return;
+  webContents.send('chat-stream-model', { requestId, model });
+
   try {
-    const stream = client.messages.stream({
-      model,
-      max_tokens: 4096,
-      system: [
-        {
-          type: 'text',
-          text: systemText,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: apiMessages,
-    });
+    // Tool-use loop: Claude may return tool_use blocks that we need to
+    // execute and feed back before it continues with a text response.
+    let loopMessages = [...apiMessages];
+    let iterations = 0;
+    const MAX_ITERATIONS = 20; // safety cap
 
-    // Use the high-level "text" event for delta strings — simpler than
-    // filtering content_block_delta events manually, and we don't need
-    // thinking blocks for chat (we're not enabling adaptive thinking on
-    // chat-only turns to keep latency down).
-    stream.on('text', (delta) => {
+    while (iterations < MAX_ITERATIONS) {
+      iterations++;
+
+      const stream = client.messages.stream({
+        model,
+        max_tokens: 4096,
+        system: [
+          {
+            type: 'text',
+            text: systemText,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        tools: CIRCUIT_TOOLS,
+        messages: loopMessages,
+      });
+
+      // Collect text deltas for the UI and the full content blocks for
+      // the tool-use check after the stream ends.
+      stream.on('text', (delta) => {
+        if (webContents.isDestroyed()) return;
+        webContents.send('chat-stream-token', { requestId, delta });
+      });
+
+      const finalMessage = await stream.finalMessage();
       if (webContents.isDestroyed()) return;
-      webContents.send('chat-stream-token', { requestId, delta });
-    });
 
-    const finalMessage = await stream.finalMessage();
-    if (webContents.isDestroyed()) return;
-    webContents.send('chat-stream-done', {
-      requestId,
-      stopReason: finalMessage.stop_reason,
-      usage: {
-        inputTokens: finalMessage.usage.input_tokens,
-        outputTokens: finalMessage.usage.output_tokens,
-        cacheReadTokens: finalMessage.usage.cache_read_input_tokens ?? 0,
-        cacheWriteTokens: finalMessage.usage.cache_creation_input_tokens ?? 0,
-      },
-    });
+      // Check if the response contains tool_use blocks
+      const toolUseBlocks = finalMessage.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
+      );
+
+      if (toolUseBlocks.length === 0 || finalMessage.stop_reason !== 'tool_use') {
+        // No tool calls — we're done. Send the final done event.
+        webContents.send('chat-stream-done', {
+          requestId,
+          stopReason: finalMessage.stop_reason,
+          usage: {
+            inputTokens: finalMessage.usage.input_tokens,
+            outputTokens: finalMessage.usage.output_tokens,
+            cacheReadTokens: finalMessage.usage.cache_read_input_tokens ?? 0,
+            cacheWriteTokens: finalMessage.usage.cache_creation_input_tokens ?? 0,
+          },
+        });
+        return;
+      }
+
+      // Execute tool calls in the renderer
+      const toolCalls = toolUseBlocks.map((b) => ({
+        id: b.id,
+        name: b.name,
+        input: b.input as Record<string, unknown>,
+      }));
+
+      // Notify the UI that tool calls are being executed
+      webContents.send('chat-stream-token', {
+        requestId,
+        delta: '',
+        toolCalls: toolCalls.map((tc) => ({ name: tc.name, input: tc.input })),
+      });
+
+      const results = await executeToolCalls(webContents, requestId, toolCalls);
+
+      // Append the assistant's full response (including tool_use blocks)
+      // and the tool results to the conversation, then loop.
+      loopMessages = [
+        ...loopMessages,
+        { role: 'assistant' as const, content: finalMessage.content },
+        {
+          role: 'user' as const,
+          content: results.map((r) => ({
+            type: 'tool_result' as const,
+            tool_use_id: r.id,
+            content: JSON.stringify(r.result),
+          })),
+        },
+      ];
+    }
+
+    // If we hit the iteration cap, send done anyway
+    if (!webContents.isDestroyed()) {
+      webContents.send('chat-stream-done', {
+        requestId,
+        stopReason: 'max_iterations',
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      });
+    }
   } catch (err: unknown) {
     if (webContents.isDestroyed()) return;
     let message = 'Unknown error';

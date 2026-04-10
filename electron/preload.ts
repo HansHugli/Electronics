@@ -7,7 +7,10 @@ contextBridge.exposeInMainWorld('electronApi', {
   loadCircuit: () => ipcRenderer.invoke('load-circuit'),
   getConfig: () => ipcRenderer.invoke('get-config'),
   loadChips: () => ipcRenderer.invoke('load-chips'),
+  saveChip: (chipJson: unknown) => ipcRenderer.invoke('save-chip', chipJson),
   loadHex: () => ipcRenderer.invoke('load-hex'),
+  autosave: (data: string) => ipcRenderer.invoke('autosave', data),
+  loadAutosave: () => ipcRenderer.invoke('load-autosave'),
   saveDemo: (name: string, data: string) => ipcRenderer.invoke('save-demo', name, data),
   loadNamedCircuit: (name: string) => ipcRenderer.invoke('load-named-circuit', name),
   setTitle: (title: string) => ipcRenderer.send('set-title', title),
@@ -34,6 +37,11 @@ contextBridge.exposeInMainWorld('electronApi', {
   // Subscribe to streaming events. Returns an unsubscribe function.
   onChatStream: (handlers: {
     onToken?: (e: { requestId: string; delta: string }) => void;
+    onModel?: (e: { requestId: string; model: string }) => void;
+    onToolCalls?: (e: {
+      requestId: string;
+      toolCalls: { id: string; name: string; input: Record<string, unknown> }[];
+    }) => void;
     onDone?: (e: {
       requestId: string;
       stopReason: string | null;
@@ -43,6 +51,12 @@ contextBridge.exposeInMainWorld('electronApi', {
   }) => {
     const tokenHandler = (_e: unknown, payload: { requestId: string; delta: string }) =>
       handlers.onToken?.(payload);
+    const modelHandler = (_e: unknown, payload: { requestId: string; model: string }) =>
+      handlers.onModel?.(payload);
+    const toolCallHandler = (
+      _e: unknown,
+      payload: { requestId: string; toolCalls: { id: string; name: string; input: Record<string, unknown> }[] },
+    ) => handlers.onToolCalls?.(payload);
     const doneHandler = (
       _e: unknown,
       payload: {
@@ -56,14 +70,23 @@ contextBridge.exposeInMainWorld('electronApi', {
       payload: { requestId: string; kind: string; message: string },
     ) => handlers.onError?.(payload);
     ipcRenderer.on('chat-stream-token', tokenHandler);
+    ipcRenderer.on('chat-stream-model', modelHandler);
+    ipcRenderer.on('chat-stream-tool-calls', toolCallHandler);
     ipcRenderer.on('chat-stream-done', doneHandler);
     ipcRenderer.on('chat-stream-error', errorHandler);
     return () => {
       ipcRenderer.off('chat-stream-token', tokenHandler);
+      ipcRenderer.off('chat-stream-model', modelHandler);
+      ipcRenderer.off('chat-stream-tool-calls', toolCallHandler);
       ipcRenderer.off('chat-stream-done', doneHandler);
       ipcRenderer.off('chat-stream-error', errorHandler);
     };
   },
+  /** Send tool execution results back to the main process. */
+  chatSendToolResults: (
+    requestId: string,
+    results: { id: string; result: { success: boolean; message: string; data?: Record<string, unknown> } }[],
+  ) => ipcRenderer.send(`chat-tool-result-${requestId}`, results),
 
   onMenuAction: (callback: (action: string) => void) => {
     ipcRenderer.removeAllListeners('menu-action');

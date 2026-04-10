@@ -345,6 +345,43 @@ ipcMain.handle('load-chips', async () => {
   return chips;
 });
 
+// Save a chip definition JSON to the chips directory (used by AI create_component_type)
+ipcMain.handle('save-chip', async (_event, chipJson: unknown) => {
+  const dir = getChipsDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const chip = chipJson as { type: string };
+  const filePath = path.join(dir, `${chip.type}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(chipJson, null, 2), 'utf-8');
+  return filePath;
+});
+
+// ---- Autosave ---- //
+
+function getAutosavePath(): string {
+  const config = loadConfig();
+  return path.join(path.dirname(config.dataFilePath), 'autosave.ecx');
+}
+
+ipcMain.handle('autosave', async (_event, data: string) => {
+  const filePath = getAutosavePath();
+  ensureDir(filePath);
+  fs.writeFileSync(filePath, data, 'utf-8');
+  return filePath;
+});
+
+ipcMain.handle('load-autosave', async () => {
+  const filePath = getAutosavePath();
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const data = fs.readFileSync(filePath, 'utf-8');
+    return { data };
+  } catch {
+    return null;
+  }
+});
+
 // ---- Window ---- //
 
 function createMainWindow() {

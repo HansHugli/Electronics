@@ -28,7 +28,7 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 - [x] Resistor (1x2) — configurable resistance, engineering notation display (47kΩ)
 - [x] Capacitor (1x1) — configurable capacitance, backward Euler companion model
 - [x] Potentiometer (1x2) — adjustable position slider, two-resistor model
-- [x] Switch (1x1) — click to toggle, union-find merge when closed
+- [x] Switch (1x1) — click to toggle, union-find merge when closed; momentary pushbutton mode
 
 ### Power & Measurement
 - [x] Power supply — DC and AC modes, sine/square waveforms, configurable voltage
@@ -105,12 +105,28 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 - [x] 7-Seg Counter — 555 astable → CD4026 → 7-segment display
 - [x] AVR Blink — ATmega328P with pre-loaded hand-assembled hex (pin 13 LED)
 - [x] 5x7 Matrix — ATmega328P + 74HC595 driving animated LED matrix patterns
+- [x] Necklace — Direct-AVR-driven 5x7 LED matrix with scrolling text animation
+
+### AI Integration
+- [x] In-app Claude chat panel with circuit-aware context (API key in settings, streaming responses)
+- [x] Three context modes: always, on-change, never
+- [x] AI circuit building via tool use — Claude places components and wires directly on the board
+- [x] AI component creation — Claude can invent new component types (sensors, tubes, relays, etc.) that persist to disk
+- [x] Auto-model selection (Haiku/Sonnet/Opus) based on task complexity
+- [x] Model and circuit context controls moved to chat panel for quick access
+- [x] Markdown rendering in chat responses (code blocks, tables, lists, headings)
+- [x] Processing status indicators (Thinking, Building circuit, Creating component, etc.)
+
+### Persistence
+- [x] Circuit autosave on every change with restore on app launch
+- [x] AI-created component types saved to chips/ directory and loaded on startup
 
 ### Remaining
 - [x] PCB auto-layout: cluster connected components together, route traces with collision avoidance
 - [x] Multi-select and group operations
 - [x] Wire routing refinements
 - [x] Arduino sketch editor: load .ino files from disk, scrollable editor, synced line numbers
+- [x] Momentary pushbutton switch mode
 
 ## Technical Stack
 

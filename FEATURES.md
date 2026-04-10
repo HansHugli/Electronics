@@ -30,7 +30,7 @@ Hover any pin hole to see its connected strip highlighted in yellow.
 - **Potentiometer** (1x2) — adjustable position slider in properties panel
 
 ### Input
-- **Switch** (1x1) — click to toggle between 0 (open) and 1 (closed)
+- **Switch** (1x1) — click to toggle between 0 (open) and 1 (closed). Supports a **momentary** mode (pushbutton) — closed only while held/clicked.
 
 ### Output
 - **LED** (1x1) — configurable color, glows during simulation based on current
@@ -158,6 +158,7 @@ When the AVR bit-bangs a sequential digital chip such as the 74HC595 shift regis
 - **Save** (Ctrl+S) — saves as `.ecx` file via native dialog
 - **Open** (Ctrl+O) — opens an `.ecx` file
 - Circuits store all components, wires, and properties
+- **Autosave** — circuit state is automatically saved on every change and restored on app launch
 
 ## Export
 
@@ -191,9 +192,46 @@ You can add new chip types by placing JSON files in the `chips/` directory next 
 
 See `chips/example-shift-register.json` for a complete example.
 
+## Claude AI Chat Panel
+
+The app includes a built-in AI assistant powered by Claude that can understand, build, and modify your circuits.
+
+### Setup
+
+1. Open **Settings** and add your Anthropic API key
+2. The chat panel appears on the right side of the app
+
+### Capabilities
+
+- **Ask questions** — "what does this circuit do?", "why isn't my LED lighting up?"
+- **Build circuits** — "build me a 555 blink circuit" or "create a Geiger counter" — Claude places components and wires them directly on the board
+- **Create new components** — if a component doesn't exist in the catalog (e.g. a Geiger-Muller tube, a relay, a sensor), Claude invents it with the correct pins and places it on the board. AI-created components persist across app restarts.
+- **Modify circuits** — "add a second 7-segment display" or "remove the capacitor"
+
+### Settings (bottom of chat panel)
+
+- **Model** — choose between Auto, Opus 4.6, Sonnet 4.6, or Haiku 4.5
+- **Auto mode** — dynamically selects the best model based on task complexity (Haiku for simple questions, Sonnet for general use, Opus for circuit building and debugging)
+- **Circuit context** — controls whether Claude can see your current circuit: on-change (recommended), always, or never
+
+### Processing Indicators
+
+While Claude is working, status messages show what's happening:
+- "Thinking..." — processing your request
+- "Building circuit..." — placing components and wires
+- "Creating new component..." — inventing a new component type
+- "Modifying circuit..." — changing the existing circuit
+
+Responses render as formatted markdown with code blocks, tables, and lists.
+
+## Autosave
+
+Your circuit is automatically saved every time you make a change. When you reopen the app, your last circuit is restored exactly as you left it — no manual save required. Autosave works alongside the manual Save/Open workflow.
+
 ## Demos
 
 - **Blink** — 555 astable circuit driving an LED (Ra=47k, Rb=68k, C=47uF)
 - **Counter** — 555 astable driving a CD4026 decade counter into a 7-segment display
 - **AVR Blink** — ATmega328P running a pre-loaded Arduino Blink sketch (pin 13 LED toggle with ~1s delay)
 - **5x7 Matrix** — ATmega328P bit-banging a 74HC595 shift register to multiplex three animated patterns (heart, square, X) on a 5x7 LED matrix. Demonstrates AVR-driven sequential digital edge replay and the matrix renderer's sliding-window aggregation that reconstructs row-multiplexed scans into a steady image.
+- **Necklace** — Direct-AVR-driven 5x7 LED matrix with scrolling text animation, demonstrating the ATmega328P driving a matrix without external shift registers.
