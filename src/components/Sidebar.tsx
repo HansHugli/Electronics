@@ -2,24 +2,31 @@ import { COMPONENT_DEFINITIONS, COMPONENT_CATEGORIES } from '../data/components'
 import { ComponentDefinition } from '../types';
 
 interface SidebarProps {
-  onDragStart: (componentType: string) => void;
+  onClick: (componentType: string) => void;
+  onDeleteType?: (componentType: string) => void;
+  /** Incremented whenever COMPONENT_DEFINITIONS is mutated, to trigger a re-render. */
+  catalogVersion: number;
 }
 
 const DARK_COLORS = new Set(['#1a1a1a', '#2d2d2d', '#4a4a4a', '#1e293b']);
 
-function ComponentCard({ def, onDragStart }: { def: ComponentDefinition; onDragStart: () => void }) {
+function ComponentCard({
+  def,
+  onClick,
+  onDelete,
+}: {
+  def: ComponentDefinition;
+  onClick: () => void;
+  onDelete?: () => void;
+}) {
   const isDark = DARK_COLORS.has(def.color);
   const iconText = def.icon ?? def.label[0];
 
   return (
     <div
       className="component-card"
-      draggable
-      title={def.description ? `${def.label} — ${def.description}\nDrag onto the breadboard to place.` : `${def.label}\nDrag onto the breadboard to place.`}
-      onDragStart={(e) => {
-        e.dataTransfer.setData('componentType', def.type);
-        onDragStart();
-      }}
+      title={def.description ? `${def.label} — ${def.description}\nClick to place on the breadboard.` : `${def.label}\nClick to place on the breadboard.`}
+      onClick={onClick}
     >
       <div className="component-card-icon" style={{
         backgroundColor: def.color + '22',
@@ -31,11 +38,26 @@ function ComponentCard({ def, onDragStart }: { def: ComponentDefinition; onDragS
         <span className="component-card-name">{def.label}</span>
         {def.description && <span className="component-card-detail">{def.description}</span>}
       </div>
+      {onDelete && (
+        <button
+          type="button"
+          className="component-card-delete"
+          title={`Delete "${def.label}" component type`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 }
 
-export default function Sidebar({ onDragStart }: SidebarProps) {
+export default function Sidebar({ onClick, onDeleteType, catalogVersion }: SidebarProps) {
+  // Re-read definitions whenever catalogVersion changes (triggered by create/delete)
+  void catalogVersion;
   const definitions = Object.values(COMPONENT_DEFINITIONS);
 
   return (
@@ -51,7 +73,12 @@ export default function Sidebar({ onDragStart }: SidebarProps) {
             <div key={cat.id} className="component-group">
               <h3 className="component-group-label">{cat.label}</h3>
               {items.map((def) => (
-                <ComponentCard key={def.type} def={def} onDragStart={() => onDragStart(def.type)} />
+                <ComponentCard
+                  key={def.type}
+                  def={def}
+                  onClick={() => onClick(def.type)}
+                  onDelete={onDeleteType ? () => onDeleteType(def.type) : undefined}
+                />
               ))}
             </div>
           );

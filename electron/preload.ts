@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronApi', {
   getConfig: () => ipcRenderer.invoke('get-config'),
   loadChips: () => ipcRenderer.invoke('load-chips'),
   saveChip: (chipJson: unknown) => ipcRenderer.invoke('save-chip', chipJson),
+  deleteChip: (typeId: string) => ipcRenderer.invoke('delete-chip', typeId),
   loadHex: () => ipcRenderer.invoke('load-hex'),
   autosave: (data: string) => ipcRenderer.invoke('autosave', data),
   loadAutosave: () => ipcRenderer.invoke('load-autosave'),

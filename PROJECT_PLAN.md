@@ -120,6 +120,14 @@ Build a desktop electronics circuit simulation app that lets users design, wire,
 ### Persistence
 - [x] Circuit autosave on every change with restore on app launch
 - [x] AI-created component types saved to chips/ directory and loaded on startup
+- [x] AI-created components fully integrated — no distinction from built-in types
+
+### Component Management
+- [x] Click-to-place from sidebar (replaces drag-and-drop)
+- [x] DIP chip auto-correction to straddle center gap
+- [x] Pin-aware grid snapping for all component types
+- [x] Delete any component type from the sidebar (with confirmation)
+- [x] AI delete_component_type tool for cleanup
 
 ### Remaining
 - [x] PCB auto-layout: cluster connected components together, route traces with collision avoidance

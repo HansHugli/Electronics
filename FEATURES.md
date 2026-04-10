@@ -52,10 +52,11 @@ Hover any pin hole to see its connected strip highlighted in yellow.
 
 ## Placing Components
 
-1. Drag a component from the sidebar onto the breadboard
+1. Click a component in the sidebar to place it on the breadboard — it appears at the first available position, ready to drag to its final location
 2. Components snap to the grid so pins align with breadboard holes
-3. Components cannot overlap — the drop is rejected if it would collide
-4. Components can only be placed where all pins land on valid holes
+3. DIP chips are automatically positioned to straddle the center gap
+4. Components cannot overlap — the placement is rejected if it would collide
+5. Any component type can be deleted from the sidebar with the **x** button (with confirmation)
 
 ## Wiring
 
@@ -205,8 +206,9 @@ The app includes a built-in AI assistant powered by Claude that can understand, 
 
 - **Ask questions** — "what does this circuit do?", "why isn't my LED lighting up?"
 - **Build circuits** — "build me a 555 blink circuit" or "create a Geiger counter" — Claude places components and wires them directly on the board
-- **Create new components** — if a component doesn't exist in the catalog (e.g. a Geiger-Muller tube, a relay, a sensor), Claude invents it with the correct pins and places it on the board. AI-created components persist across app restarts.
+- **Create new components** — if a component doesn't exist in the catalog (e.g. a Geiger-Muller tube, a relay, a sensor), Claude invents it with the correct pins and places it on the board. AI-created components persist across app restarts and appear in the sidebar like any other component.
 - **Modify circuits** — "add a second 7-segment display" or "remove the capacitor"
+- **Delete component types** — Claude can remove custom component types, or you can delete any component type from the sidebar
 
 ### Settings (bottom of chat panel)
 

@@ -87,6 +87,7 @@ function App() {
   const [simSpeed, setSimSpeed] = useState(1); // multiplier: 0.25, 0.5, 1, 2, 5, 10
   const [simAccuracy, setSimAccuracy] = useState(1); // sub-steps per tick: 1, 2, 5, 10
   const [chipsLoaded, setChipsLoaded] = useState(false);
+  const [catalogVersion, setCatalogVersion] = useState(0);
   const [scopeVisible, setScopeVisible] = useState(false);
   const scope = useOscilloscope();
 
@@ -266,6 +267,109 @@ function App() {
       return next;
     });
   }, [components, wires, history]);
+
+  /** Click-to-place: put the component at the first non-overlapping position
+   *  near the top-left of the board so the user can see it and drag it. */
+  const handleClickPlace = useCallback((type: string) => {
+    if (type === 'power') {
+      // Place power in the supply area, scan rows for a free spot
+      for (let row = 0; row < 40; row++) {
+        const position = { x: 0, y: row * GRID_H };
+        const comp: PlacedComponent = {
+          id: genId(), type: 'power', position, rotation: 0,
+          properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+          state: {},
+        };
+        if (!components.some((c) => componentsOverlap(comp, c))) {
+          setPendingPowerDrop(position);
+          return;
+        }
+      }
+      return;
+    }
+
+    const def = COMPONENT_DEFINITIONS[type];
+    if (!def) return;
+    const defaults: Record<string, number | string> = {};
+    if (def.properties) {
+      for (const [key, prop] of Object.entries(def.properties)) {
+        defaults[key] = prop.default;
+      }
+    }
+
+    // Choose placement column: DIP chips go at col 6 to straddle gap, others at col 2
+    const placeCol = (def.width === 2) ? 6 : 2;
+
+    // Compute pin offset for first pin (same logic as snapComponentToGrid)
+    const pin0 = def.pins[0];
+    const compW = def.width * GRID_W;
+    const compH = def.height * GRID_H;
+    let pinOX = 0, pinOY = 0;
+    if (pin0) {
+      switch (pin0.side) {
+        case 'left':   pinOX = 0;                pinOY = compH * pin0.offset; break;
+        case 'right':  pinOX = compW;            pinOY = compH * pin0.offset; break;
+        case 'top':    pinOX = compW * pin0.offset; pinOY = 0;                break;
+        case 'bottom': pinOX = compW * pin0.offset; pinOY = compH;            break;
+      }
+    }
+
+    // Scan rows for a free spot
+    const holeX = BOARD_X_OFFSET + placeCol * GRID_W + GRID_W / 2;
+    for (let row = 0; row < 45; row++) {
+      const holeY = row * GRID_H + GRID_H / 2;
+      const position = { x: holeX - pinOX, y: holeY - pinOY };
+      const comp: PlacedComponent = {
+        id: genId(), type, position, rotation: 0,
+        properties: defaults, state: {},
+      };
+      if (!components.some((c) => componentsOverlap(comp, c))) {
+        setComponents((prev) => {
+          const next = [...prev, comp];
+          history.push(next, wires);
+          return next;
+        });
+        setSelectedComponentIds([comp.id]);
+        return;
+      }
+    }
+  }, [components, wires, history]);
+
+  /** Delete a custom component type — removes all instances, wires, definition, and disk file. */
+  const handleDeleteComponentType = useCallback((typeId: string) => {
+    const def = COMPONENT_DEFINITIONS[typeId];
+    if (!def) return;
+
+    const instanceCount = components.filter((c) => c.type === typeId).length;
+    const msg = instanceCount > 0
+      ? `Delete "${def.label}" and remove ${instanceCount} instance(s) from the board?`
+      : `Delete "${def.label}" component type?`;
+    if (!window.confirm(msg)) return;
+
+    // Remove all placed instances and their wires
+    const instanceIds = components.filter((c) => c.type === typeId).map((c) => c.id);
+    if (instanceIds.length > 0) {
+      setComponents((prev) => {
+        const next = prev.filter((c) => c.type !== typeId);
+        setWires((prevWires) => {
+          const nextWires = prevWires.filter(
+            (w) => !instanceIds.includes(w.from.componentId) && !instanceIds.includes(w.to.componentId),
+          );
+          history.push(next, nextWires);
+          return nextWires;
+        });
+        return next;
+      });
+      setSelectedComponentIds((prev) => prev.filter((id) => !instanceIds.includes(id)));
+    }
+
+    delete COMPONENT_DEFINITIONS[typeId];
+    setCatalogVersion((v) => v + 1);
+
+    if (window.electronApi?.deleteChip) {
+      window.electronApi.deleteChip(typeId).catch(() => {});
+    }
+  }, [components, history]);
 
   const handlePowerConfigConfirm = useCallback((config: { mode: string; voltage: number; waveform: string }) => {
     if (!pendingPowerDrop) return;
@@ -489,7 +593,7 @@ function App() {
         switch (name) {
           case 'add_component': {
             const type = input.type as string;
-            const col = input.col as number;
+            let col = input.col as number;
             const row = input.row as number;
             const props = (input.properties as Record<string, number | string> | undefined) ?? {};
 
@@ -507,7 +611,32 @@ function App() {
             }
             const mergedProps = { ...defaults, ...props };
 
-            const position = { x: BOARD_X_OFFSET + col * GRID_W, y: row * GRID_H };
+            // Auto-correct DIP chip placement to straddle the center gap.
+            // Width-2 chips need left pins on col 6 (board 1) or col 22 (board 2).
+            if (def.width === 2 && type !== 'power' && type !== 'multimeter') {
+              if (col >= 2 && col <= 8) col = 6;
+              else if (col >= 18 && col <= 24) col = 22;
+            }
+
+            // Compute position so the first pin lands on the grid hole center
+            // at (col, row). This mirrors Breadboard's snapComponentToGrid logic.
+            const pin0 = def.pins[0];
+            const compW = def.width * GRID_W;
+            const compH = def.height * GRID_H;
+            let pinOffX = 0, pinOffY = 0;
+            if (pin0) {
+              switch (pin0.side) {
+                case 'left':   pinOffX = 0;                pinOffY = compH * pin0.offset; break;
+                case 'right':  pinOffX = compW;            pinOffY = compH * pin0.offset; break;
+                case 'top':    pinOffX = compW * pin0.offset; pinOffY = 0;                break;
+                case 'bottom': pinOffX = compW * pin0.offset; pinOffY = compH;            break;
+              }
+            }
+            // Hole center for the target grid cell
+            const holeX = BOARD_X_OFFSET + col * GRID_W + GRID_W / 2;
+            const holeY = row * GRID_H + GRID_H / 2;
+            // Component position = hole center minus pin offset within component
+            const position = { x: holeX - pinOffX, y: holeY - pinOffY };
             const comp: PlacedComponent = {
               id: genId(),
               type,
@@ -644,7 +773,12 @@ function App() {
             }
 
             if (COMPONENT_DEFINITIONS[typeId]) {
-              return { success: false, message: `Component type "${typeId}" already exists. Use it directly with add_component.` };
+              const existing = COMPONENT_DEFINITIONS[typeId];
+              return {
+                success: true,
+                message: `Component type "${typeId}" already exists (${existing.label}). Use it directly with add_component.`,
+                data: { type: typeId, pins: existing.pins.map((p) => p.id) },
+              };
             }
 
             // Build chip JSON and register it
@@ -653,6 +787,9 @@ function App() {
             const chipJson: ChipDefinitionJSON = {
               type: typeId,
               label,
+              description,
+              icon: label.slice(0, 2).toUpperCase(),
+              chipLabel: label,
               category,
               behavior: 'passthrough',
               color,
@@ -675,10 +812,8 @@ function App() {
             };
 
             const def = chipJSONToDefinition(chipJson);
-            def.description = description;
-            def.icon = label.slice(0, 2).toUpperCase();
-            def.chipLabel = label;
             COMPONENT_DEFINITIONS[typeId] = def;
+            setCatalogVersion((v) => v + 1);
 
             // Persist to disk so the component survives app restarts
             if (window.electronApi?.saveChip) {
@@ -689,6 +824,42 @@ function App() {
               success: true,
               message: `Created new component type "${typeId}" (${label}) with ${totalPins} pins. You can now place it with add_component.`,
               data: { type: typeId, pins: inputPins.map((p) => p.id) },
+            };
+          }
+
+          case 'delete_component_type': {
+            const typeId = input.type as string;
+            if (!typeId) {
+              return { success: false, message: 'type is required.' };
+            }
+            if (!COMPONENT_DEFINITIONS[typeId]) {
+              return { success: false, message: `Component type "${typeId}" not found.` };
+            }
+            // Remove all placed instances and their wires
+            const instanceIds = componentsRef.current.filter((c) => c.type === typeId).map((c) => c.id);
+            if (instanceIds.length > 0) {
+              const nextComps = componentsRef.current.filter((c) => c.type !== typeId);
+              const nextWires = wiresRef.current.filter(
+                (w) => !instanceIds.includes(w.from.componentId) && !instanceIds.includes(w.to.componentId),
+              );
+              setComponents(nextComps);
+              setWires(nextWires);
+              componentsRef.current = nextComps;
+              wiresRef.current = nextWires;
+            }
+
+            // Remove the definition
+            delete COMPONENT_DEFINITIONS[typeId];
+            setCatalogVersion((v) => v + 1);
+
+            // Delete from disk
+            if (window.electronApi?.deleteChip) {
+              window.electronApi.deleteChip(typeId).catch(() => {});
+            }
+
+            return {
+              success: true,
+              message: `Deleted component type "${typeId}"${instanceIds.length > 0 ? ` and removed ${instanceIds.length} instance(s) from the board` : ''}.`,
             };
           }
 
@@ -1069,7 +1240,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar onDragStart={() => {}} />
+      <Sidebar onClick={handleClickPlace} onDeleteType={handleDeleteComponentType} catalogVersion={catalogVersion} />
       <div className="main-area">
         <Toolbar
           simRunning={simRunning}

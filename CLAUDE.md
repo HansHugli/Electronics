@@ -19,7 +19,7 @@ Build electronics circuits out of visual components and run them in a simulation
 
 ## Development
 
-- `npm run electron-dev` — Run in dev mode (React + Electron concurrently)
+- `npm run electron:dev` — Run in dev mode (React + Electron concurrently)
 - `npm run package:mac` / `npm run package:win` — Package for platform
 - `npm run ship` — Full release flow (build, package, version bump, push)
 

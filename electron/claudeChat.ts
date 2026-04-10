@@ -55,14 +55,15 @@ const CIRCUIT_TOOLS: Anthropic.Tool[] = [
 
 Grid coordinates:
 - col: 0-30 (breadboard column). Board 1 spans cols 0-14, board 2 spans cols 16-30. Col 15 is the gap between boards.
-  Within each board: cols 0-1 are power rails, cols 2-6 are left component area, col 7 is the center gap (for DIP chips to straddle), cols 8-12 are right component area, cols 13-14 are power rails.
+  Within each board: cols 0-1 are power rails, cols 2-6 are left component area, col 7 is the center gap, cols 8-12 are right component area, cols 13-14 are power rails.
   For board 2, add 16 to these values.
 - row: 0-49 (breadboard row, top to bottom)
 
-The component's top-left pin lands on (col, row). Multi-pin components extend rightward and downward.
-DIP chips should be placed so they straddle the center gap (col 7 for board 1, col 23 for board 2) — place them at col 6 or col 5 depending on width.
+The "col" value is where the component's LEFT pins land. For width-1 components (resistors, LEDs, etc.), place them anywhere in the component area (cols 2-6 or 8-12).
 
-Power supplies are special — they go in the supply area to the left of the board (use col -4 to -1, or just use col 0 and row 0-10 area).
+DIP chips (width=2) are automatically positioned to straddle the center gap. Just specify col=6 for board 1 or col=22 for board 2 — the system will place left pins on that column and right pins two columns over (skipping the gap). You MUST use col=6 for DIP chips on board 1 (not col=5 or col=7).
+
+Power supplies are special — use col=-4 and a row in the 0-10 range.
 
 Returns the component ID assigned to the new component.`,
     input_schema: {
@@ -182,6 +183,8 @@ Use bare board holes to connect to power rails or to route through the breadboar
     name: 'create_component_type',
     description: `Create a new component type that doesn't exist in the catalog. Use this when the user asks for a component not in the catalog (e.g. a Geiger-Müller tube, a relay, a sensor, etc.). The new type is registered immediately and can then be placed with add_component.
 
+IMPORTANT: If the type ID already exists, this tool returns success with the existing type info — it does NOT create a duplicate. Always reuse existing type IDs when the same component is needed again. Use list_components first to check what custom types already exist on the board.
+
 The component is rendered as a DIP-style chip on the breadboard with labeled pins. It uses "passthrough" behavior (visual only — no simulation model), but the circuit can still be wired and demonstrated structurally.
 
 After creating a new type, immediately use add_component to place it on the board.`,
@@ -232,6 +235,20 @@ After creating a new type, immediately use add_component to place it on the boar
       required: ['type', 'label', 'pins'],
     },
   },
+  {
+    name: 'delete_component_type',
+    description: 'Delete a custom (AI-created) component type. Built-in component types cannot be deleted. Also removes all placed instances of this component and their wires from the board.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        type: {
+          type: 'string',
+          description: 'The type ID of the custom component to delete (e.g. "geiger_tube")',
+        },
+      },
+      required: ['type'],
+    },
+  },
 ];
 
 // ---- System Prompt ---- //
@@ -257,12 +274,21 @@ Guidelines:
 - Be concise. Most answers should fit in 1–4 short paragraphs. The chat panel is narrow.
 - When the user shares their circuit, refer to specific component IDs and pin names from the JSON.
 - Use components from the catalog below when available. When a component doesn't exist, create it with create_component_type.
-- When building circuits, place components with enough spacing so they don't overlap. DIP chips straddle the center gap (col 7).
 - After placing components and wiring them, give a brief summary of what you built and suggest the user click Run to test it.
 - If you don't have enough information, ask one focused question rather than guessing.
 - For Arduino/AVR sketches, the user can edit and recompile via the Sketch Editor — you can suggest sketch changes as code blocks.
-- When wiring to power rails, use bare board holes: { componentId: "board", pinId: "col,row" }. Power rails are cols 0-1 (left) and 13-14 (right) on each board.
-- Connect component pins to the breadboard by wiring them to board holes in the same row/strip, letting the breadboard's internal wiring make the connection.
+
+Placement rules:
+- ALL DIP chips (width=2) MUST be placed at col=6 on board 1 (or col=22 on board 2). This is automatically enforced — the system will correct other values. The chip's left pins land on col 6, right pins on col 8, straddling the center gap at col 7.
+- Width-1 components (resistors, LEDs, capacitors, switches) go in the component area: cols 2-6 (left side) or cols 8-12 (right side).
+- Space components vertically — each chip occupies several rows (e.g. a 555 timer is 4 rows tall). Leave at least 1-2 rows between components.
+- Power supplies use col=-4, row in the 0-10 range.
+
+Wiring rules:
+- Wire component pins directly to other component pins when they should connect.
+- To connect through the breadboard's internal wiring, wire a component pin to a bare board hole: { componentId: "board", pinId: "col,row" }. Pins in the same 5-pin strip (cols 2-6 same row, or cols 8-12 same row) are internally connected.
+- Power rails are cols 0-1 (positive) and cols 13-14 (negative) on each board. Rail pins in the same 5-row block are connected.
+- To connect a chip's left pin to a component on the right side (or vice versa), wire through board holes — the breadboard's internal strip wiring handles it.
 
 Available component catalog (id → label):
 {COMPONENT_CATALOG}`;

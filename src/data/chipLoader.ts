@@ -26,6 +26,9 @@ import { COMPONENT_DEFINITIONS } from './components';
 export interface ChipDefinitionJSON {
   type: string;
   label: string;
+  description?: string;   // short blurb for sidebar
+  icon?: string;          // 1-3 char icon for sidebar card
+  chipLabel?: string;     // short label for chip body on breadboard
   package?: string;       // e.g. "DIP-8", "DIP-14", "DIP-28"
   category?: string;      // defaults to 'active'
   behavior: string;       // built-in model name: 'logic_and', 'logic_or', 'timer555', 'counter', 'opamp', 'passthrough', etc.
@@ -94,6 +97,9 @@ export function chipJSONToDefinition(json: ChipDefinitionJSON): ComponentDefinit
   return {
     type: json.type,
     label: json.label,
+    description: json.description,
+    icon: json.icon,
+    chipLabel: json.chipLabel,
     category: (json.category as ComponentDefinition['category']) ?? 'active',
     width,
     height,

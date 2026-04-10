@@ -35,6 +35,7 @@ interface ElectronApi {
   getConfig: () => Promise<AppConfigSafe>;
   loadChips: () => Promise<unknown[]>;
   saveChip: (chipJson: unknown) => Promise<string>;
+  deleteChip: (typeId: string) => Promise<{ success: boolean; message?: string }>;
   loadHex: () => Promise<{ filePath: string; name: string; data: string } | null>;
   autosave: (data: string) => Promise<string>;
   loadAutosave: () => Promise<{ data: string } | null>;

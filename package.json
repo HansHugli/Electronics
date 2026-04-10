@@ -8,7 +8,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "electron-dev": "npm run build:electron && concurrently \"vite --port 5174\" \"npm:watch:electron\" \"wait-on http://localhost:5174 && npx electron .\"",
+    "electron:dev": "npm run build:electron && concurrently \"vite --port 5174\" \"npm:watch:electron\" \"wait-on http://localhost:5174 && npx electron .\"",
     "watch:electron": "tsc -p tsconfig.electron.json --watch",
     "type-check": "tsc --noEmit",
     "build:electron": "tsc -p tsconfig.electron.json",

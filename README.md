@@ -6,7 +6,7 @@ A desktop electronics circuit simulator built with React, TypeScript, and Electr
 
 ```bash
 npm install
-npm run electron-dev
+npm run electron:dev
 ```
 
 ## Features
@@ -37,7 +37,7 @@ For detailed usage instructions, see [FEATURES.md](FEATURES.md).
 
 | Command | Description |
 |---------|-------------|
-| `npm run electron-dev` | Run in dev mode (React + Electron) |
+| `npm run electron:dev` | Run in dev mode (React + Electron) |
 | `npm run build` | Build for production |
 | `npm run package:win` | Package for Windows |
 | `npm run package:mac` | Package for macOS |

@@ -345,6 +345,17 @@ ipcMain.handle('load-chips', async () => {
   return chips;
 });
 
+// Delete a chip definition JSON from the chips directory
+ipcMain.handle('delete-chip', async (_event, typeId: string) => {
+  const dir = getChipsDir();
+  const filePath = path.join(dir, `${typeId}.json`);
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
+    return { success: true };
+  }
+  return { success: false, message: 'File not found' };
+});
+
 // Save a chip definition JSON to the chips directory (used by AI create_component_type)
 ipcMain.handle('save-chip', async (_event, chipJson: unknown) => {
   const dir = getChipsDir();
