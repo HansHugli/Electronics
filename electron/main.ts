@@ -57,6 +57,49 @@ function saveConfig(config: AppConfig) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+// ---- Usage Tracking ---- //
+
+const USAGE_FILE = path.join(app.getPath('userData'), 'e101-usage.json');
+
+interface UsageRecord {
+  timestamp: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cost: number; // USD
+}
+
+/** Model pricing per million tokens (input / output). */
+const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
+  'claude-opus-4-6':   { input: 15, output: 75, cacheRead: 1.5,  cacheWrite: 18.75 },
+  'claude-sonnet-4-6': { input: 3,  output: 15, cacheRead: 0.3,  cacheWrite: 3.75  },
+  'claude-haiku-4-5':  { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1     },
+};
+
+function calculateCost(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): number {
+  const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
+  const inputCost = ((usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens) * pricing.input) / 1_000_000;
+  const outputCost = (usage.outputTokens * pricing.output) / 1_000_000;
+  const cacheReadCost = (usage.cacheReadTokens * pricing.cacheRead) / 1_000_000;
+  const cacheWriteCost = (usage.cacheWriteTokens * pricing.cacheWrite) / 1_000_000;
+  return Math.max(0, inputCost) + outputCost + cacheReadCost + cacheWriteCost;
+}
+
+function loadUsageRecords(): UsageRecord[] {
+  try {
+    if (fs.existsSync(USAGE_FILE)) {
+      return JSON.parse(fs.readFileSync(USAGE_FILE, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return [];
+}
+
+function saveUsageRecords(records: UsageRecord[]) {
+  fs.writeFileSync(USAGE_FILE, JSON.stringify(records, null, 2), 'utf-8');
+}
+
 function ensureDir(filePath: string) {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
@@ -159,6 +202,34 @@ ipcMain.handle('chat-set-circuit-mode', (_event, mode: CircuitContextMode) => {
   cfg.circuitContextMode = mode;
   saveConfig(cfg);
   return cfg.circuitContextMode;
+});
+
+// ---- Usage Tracking IPC ---- //
+
+ipcMain.handle('usage-record', (_event, record: { model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) => {
+  const cost = calculateCost(record.model, record);
+  const entry: UsageRecord = {
+    timestamp: new Date().toISOString(),
+    model: record.model,
+    inputTokens: record.inputTokens,
+    outputTokens: record.outputTokens,
+    cacheReadTokens: record.cacheReadTokens,
+    cacheWriteTokens: record.cacheWriteTokens,
+    cost,
+  };
+  const records = loadUsageRecords();
+  records.push(entry);
+  saveUsageRecords(records);
+  return entry;
+});
+
+ipcMain.handle('usage-get', () => {
+  return loadUsageRecords();
+});
+
+ipcMain.handle('usage-clear', () => {
+  saveUsageRecords([]);
+  return [];
 });
 
 ipcMain.handle('chat-set-sidebar-width', (_event, width: number) => {

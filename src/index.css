@@ -684,6 +684,22 @@ textarea {
   border-color: #38bdf8;
 }
 
+.chat-usage-btn {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 0.3rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.2rem 0.4rem;
+  cursor: pointer;
+}
+
+.chat-usage-btn:hover {
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+
 .chat-auto-badge {
   font-size: 0.65rem;
   color: #38bdf8;
@@ -1572,6 +1588,77 @@ textarea {
 
 .settings-modal-wide {
   max-width: 480px;
+}
+
+/* ---- Usage Panel ---- */
+
+.usage-modal {
+  max-width: 520px;
+  width: 90vw;
+}
+
+.usage-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.usage-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #0f172a;
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.3rem;
+}
+
+.usage-stat-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #38bdf8;
+}
+
+.usage-stat-label {
+  font-size: 0.6rem;
+  color: #64748b;
+  margin-top: 0.15rem;
+}
+
+.usage-chart-container {
+  height: 200px;
+  margin-bottom: 1rem;
+}
+
+.usage-section-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #94a3b8;
+  margin: 0 0 0.4rem;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid #1e293b;
+  text-align: left;
+}
+
+.usage-table th {
+  background: #0f172a;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.usage-table td {
+  color: #e2e8f0;
 }
 
 .settings-row {

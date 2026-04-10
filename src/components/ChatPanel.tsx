@@ -15,6 +15,8 @@ interface ChatPanelProps {
   selectedComponent: PlacedComponent | null;
   /** Open the settings dialog (used by the empty-state CTA when no key is set). */
   onOpenSettings: () => void;
+  /** Open the usage/cost panel. */
+  onOpenUsage: () => void;
   /** Execute circuit tool calls from the AI. Returns results for each tool call. */
   onExecuteToolCalls: (
     toolCalls: { id: string; name: string; input: Record<string, unknown> }[],
@@ -116,6 +118,7 @@ export default function ChatPanel({
   wires,
   selectedComponent,
   onOpenSettings,
+  onOpenUsage,
   onExecuteToolCalls,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -128,6 +131,7 @@ export default function ChatPanel({
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
   /** When model is "auto", this holds the model the backend actually chose for the current/last response. */
   const [resolvedModel, setResolvedModel] = useState<string | null>(null);
+  const resolvedModelRef = useRef<string | null>(null);
   const lastSentHash = useRef<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -180,6 +184,7 @@ export default function ChatPanel({
       onModel: ({ requestId, model: resolvedId }) => {
         if (requestId !== activeRequestId.current) return;
         setResolvedModel(resolvedId);
+        resolvedModelRef.current = resolvedId;
       },
       onToolCalls: ({ requestId, toolCalls }) => {
         if (requestId !== activeRequestId.current) return;
@@ -202,7 +207,7 @@ export default function ChatPanel({
           window.electronApi.chatSendToolResults(requestId, results);
         }
       },
-      onDone: ({ requestId }) => {
+      onDone: ({ requestId, usage }) => {
         if (requestId !== activeRequestId.current) return;
         setProcessingStatus(null);
         setMessages((prev) => {
@@ -213,6 +218,13 @@ export default function ChatPanel({
           }
           return next;
         });
+        // Record usage for cost tracking
+        if (window.electronApi?.usageRecord && usage) {
+          window.electronApi.usageRecord({
+            model: resolvedModelRef.current || model,
+            ...usage,
+          }).catch(() => {});
+        }
         setSending(false);
         activeRequestId.current = null;
       },
@@ -427,6 +439,14 @@ export default function ChatPanel({
           <option value="always">Circuit: always</option>
           <option value="never">Circuit: never</option>
         </select>
+        <button
+          type="button"
+          className="chat-usage-btn"
+          onClick={onOpenUsage}
+          title="API usage &amp; costs"
+        >
+          $
+        </button>
       </div>
     </div>
   );

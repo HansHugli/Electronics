@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('electronApi', {
   chatSetCircuitMode: (mode: 'always' | 'on-change' | 'never') =>
     ipcRenderer.invoke('chat-set-circuit-mode', mode),
   chatSetSidebarWidth: (width: number) => ipcRenderer.invoke('chat-set-sidebar-width', width),
+  usageRecord: (record: { model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) =>
+    ipcRenderer.invoke('usage-record', record),
+  usageGet: () => ipcRenderer.invoke('usage-get'),
+  usageClear: () => ipcRenderer.invoke('usage-clear'),
   chatSend: (payload: {
     requestId: string;
     messages: { role: 'user' | 'assistant'; content: string }[];

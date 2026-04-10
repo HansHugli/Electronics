@@ -19,6 +19,16 @@ interface ChatStreamHandlers {
   onError?: (e: { requestId: string; kind: string; message: string }) => void;
 }
 
+interface UsageRecord {
+  timestamp: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cost: number;
+}
+
 interface AppConfigSafe {
   dataFilePath: string;
   hasApiKey?: boolean;
@@ -54,6 +64,10 @@ interface ElectronApi {
   chatSetModel: (model: string) => Promise<string>;
   chatSetCircuitMode: (mode: 'always' | 'on-change' | 'never') => Promise<'always' | 'on-change' | 'never'>;
   chatSetSidebarWidth: (width: number) => Promise<number>;
+  usageRecord: (record: { model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) =>
+    Promise<UsageRecord>;
+  usageGet: () => Promise<UsageRecord[]>;
+  usageClear: () => Promise<UsageRecord[]>;
   chatSend: (payload: {
     requestId: string;
     messages: { role: 'user' | 'assistant'; content: string }[];

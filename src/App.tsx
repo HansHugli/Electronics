@@ -20,6 +20,7 @@ import SketchEditor from './components/SketchEditor';
 import SerialMonitor from './components/SerialMonitor';
 import PCBView from './components/PCBView';
 import ContextMenu from './components/ContextMenu';
+import UsagePanel from './components/UsagePanel';
 import { generateKiCadNetlist, generateBOM } from './engine/pcbExport';
 
 let nextId = 1;
@@ -71,6 +72,7 @@ function App() {
   const [pendingPowerDrop, setPendingPowerDrop] = useState<Point | null>(null);
   const [showAbout, setShowAbout] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showUsage, setShowUsage] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const sidebarResizeStart = useRef<{ x: number; width: number } | null>(null);
   const [sidebarResizing, setSidebarResizing] = useState(false);
@@ -1058,7 +1060,8 @@ function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const isInput = (e.target as HTMLElement).tagName === 'INPUT';
+      const tag = (e.target as HTMLElement).tagName;
+      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
       const ctrl = e.ctrlKey || e.metaKey;
 
       if (ctrl && e.key === 's') {
@@ -1143,6 +1146,7 @@ function App() {
         return;
       }
       if (e.key === 'Escape') {
+        if (isInput) return;
         setWiringFrom(null);
         setSelectedComponentIds([]);
         setSelectedWireId(null);
@@ -1343,6 +1347,7 @@ function App() {
           wires={wires}
           selectedComponent={selectedComponent}
           onOpenSettings={() => setShowSettings(true)}
+          onOpenUsage={() => setShowUsage(true)}
           onExecuteToolCalls={handleExecuteToolCalls}
         />
       </div>
@@ -1355,6 +1360,7 @@ function App() {
       )}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {showUsage && <UsagePanel onClose={() => setShowUsage(false)} />}
       {showPCBView && <PCBView components={components} wires={wires} onClose={() => setShowPCBView(false)} />}
       {showSketchEditor && (
         <SketchEditor
