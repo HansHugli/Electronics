@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.14](https://github.com/HansHugli/Electronics/compare/v0.1.13...v0.1.14) (2026-04-10)
+
+
+### Features
+
+* AI circuit builder with tool use, auto-model selection, and autosave ([ad39344](https://github.com/HansHugli/Electronics/commit/ad393443453124aee6adce6eb7bdc34615e244f5))
+
 ## [0.1.13](https://github.com/HansHugli/Electronics/compare/v0.1.12...v0.1.13) (2026-04-08)
 
 
