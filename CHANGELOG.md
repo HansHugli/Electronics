@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.1.16](https://github.com/HansHugli/Electronics/compare/v0.1.15...v0.1.16) (2026-04-10)
+
+
+### Features
+
+* API usage tracking dashboard with chart.js and fix keyboard shortcut leak ([017be3e](https://github.com/HansHugli/Electronics/commit/017be3e40e50b58dddad0157188a443b6158e2cf))
+
 ## [0.1.15](https://github.com/HansHugli/Electronics/compare/v0.1.14...v0.1.15) (2026-04-10)
 
 
