@@ -130,3 +130,46 @@ export function solve(G: number[][], b: number[]): number[] | null {
 
   return x;
 }
+
+/**
+ * Solve the dense n×n system A·x = b in place (Gaussian elimination with
+ * partial pivoting). `A` is row-major (A[i*n + j]); on return `b` holds x
+ * and `A` is destroyed. A pivot below 1e-30 means the row is floating: that
+ * unknown is set to 0 instead of producing Infinity/NaN.
+ */
+export function solveDenseInPlace(A: Float64Array, b: Float64Array, n: number): void {
+  for (let col = 0; col < n; col++) {
+    // Find pivot
+    let maxRow = col;
+    let maxVal = Math.abs(A[col * n + col]);
+    for (let row = col + 1; row < n; row++) {
+      const v = Math.abs(A[row * n + col]);
+      if (v > maxVal) { maxVal = v; maxRow = row; }
+    }
+    if (maxVal < 1e-30) continue; // singular column: leave for back-substitution
+    if (maxRow !== col) {
+      const r1 = col * n, r2 = maxRow * n;
+      for (let j = col; j < n; j++) {
+        const t = A[r1 + j]; A[r1 + j] = A[r2 + j]; A[r2 + j] = t;
+      }
+      const t = b[col]; b[col] = b[maxRow]; b[maxRow] = t;
+    }
+    const pr = col * n;
+    const inv = 1 / A[pr + col];
+    for (let row = col + 1; row < n; row++) {
+      const rr = row * n;
+      const f = A[rr + col] * inv;
+      if (f === 0) continue;
+      A[rr + col] = 0;
+      for (let j = col + 1; j < n; j++) A[rr + j] -= f * A[pr + j];
+      b[row] -= f * b[col];
+    }
+  }
+  for (let i = n - 1; i >= 0; i--) {
+    const ri = i * n;
+    let sum = b[i];
+    for (let j = i + 1; j < n; j++) sum -= A[ri + j] * b[j];
+    const d = A[ri + i];
+    b[i] = Math.abs(d) < 1e-30 ? 0 : sum / d;
+  }
+}
