@@ -17,7 +17,7 @@ How to work on this project (rules, design notes, checks, gaps and lessons) live
 
 - **Languaage** Always use TypeScript for any JavaScript-based code
 - **Frontend:** React 18 with TypeScript
-- **Desktop:** Electron 28
+- **Desktop:** Electron 41
 - **Packaging:** electron-builder (builds for Mac and Windows)
 - **Versioning:** commit-and-tag-version (conventional commits)
 
