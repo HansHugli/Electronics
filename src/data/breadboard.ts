@@ -7,9 +7,14 @@
  *   |  2 cols     |      5 cols           |     |       5 cols           |   2 cols    |
  *   |  ×50 rows   |      ×50 rows         |     |       ×50 rows        |   ×50 rows  |
  *
- * Power rails: 2 columns, pins grouped in 5-row blocks (10 such blocks per side).
- *   Each block of 2×5 = 10 pins is internally connected.
- *   Adjacent blocks are NOT connected.
+ * Power rails: 2 columns per side (one '+' column, one '-' column). Like a
+ *   real breadboard, each column is ONE connected strip that runs the full
+ *   length of its side: all 50 holes of a '+' column are one node, and all
+ *   50 holes of the '-' column next to it are another. '+' and '-' are not
+ *   connected to each other, the left and right sides are separate, and the
+ *   two breadboards are separate (jumper them with a wire). The holes are
+ *   drawn in groups of 5 only as a visual guide. The power supply terminals
+ *   are NOT connected to any rail until you run a wire to a rail hole.
  *
  * Component area: 5 columns per half. Each row of 5 pins is connected horizontally.
  *   The center gap breaks the connection — left 5 and right 5 are separate.
@@ -32,7 +37,7 @@ export const GAP_COLS = 1;
 export const TOTAL_ROWS = 50;
 export const SINGLE_BOARD_COLS = RAIL_COLS + COMP_COLS + GAP_COLS + COMP_COLS + RAIL_COLS; // 15
 
-// How many rows per power rail group
+// Rows per visual rail group (drawn spacing only; the whole rail column is one node)
 export const RAIL_GROUP_SIZE = 5;
 export const RAIL_GROUPS = TOTAL_ROWS / RAIL_GROUP_SIZE; // 10
 
@@ -100,26 +105,14 @@ export function buildPinGroups(): PinGroup[] {
     const cols = boardColumns(bi);
     const prefix = `b${bi}`;
 
-    // Left power rails — 10 groups of 2×5
-    for (let g = 0; g < RAIL_GROUPS; g++) {
-      const startRow = g * RAIL_GROUP_SIZE;
-      const posGroup: PinGroup = { id: `${prefix}-left-rail-pos-${g}`, pins: [], type: 'rail-pos' };
-      const negGroup: PinGroup = { id: `${prefix}-left-rail-neg-${g}`, pins: [], type: 'rail-neg' };
-      for (let r = 0; r < RAIL_GROUP_SIZE; r++) {
-        posGroup.pins.push({ col: cols.leftRailStart, row: startRow + r });
-        negGroup.pins.push({ col: cols.leftRailStart + 1, row: startRow + r });
-      }
-      groups.push(posGroup, negGroup);
-    }
-
-    // Right power rails — 10 groups of 2×5
-    for (let g = 0; g < RAIL_GROUPS; g++) {
-      const startRow = g * RAIL_GROUP_SIZE;
-      const posGroup: PinGroup = { id: `${prefix}-right-rail-pos-${g}`, pins: [], type: 'rail-pos' };
-      const negGroup: PinGroup = { id: `${prefix}-right-rail-neg-${g}`, pins: [], type: 'rail-neg' };
-      for (let r = 0; r < RAIL_GROUP_SIZE; r++) {
-        posGroup.pins.push({ col: cols.rightRailStart, row: startRow + r });
-        negGroup.pins.push({ col: cols.rightRailStart + 1, row: startRow + r });
+    // Power rails — each column is one strip running the full length of the
+    // board (one '+' node and one '-' node per side)
+    for (const [side, railCol] of [['left', cols.leftRailStart], ['right', cols.rightRailStart]] as const) {
+      const posGroup: PinGroup = { id: `${prefix}-${side}-rail-pos`, pins: [], type: 'rail-pos' };
+      const negGroup: PinGroup = { id: `${prefix}-${side}-rail-neg`, pins: [], type: 'rail-neg' };
+      for (let r = 0; r < TOTAL_ROWS; r++) {
+        posGroup.pins.push({ col: railCol, row: r });
+        negGroup.pins.push({ col: railCol + 1, row: r });
       }
       groups.push(posGroup, negGroup);
     }

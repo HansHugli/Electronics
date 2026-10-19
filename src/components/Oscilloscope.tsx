@@ -2,7 +2,7 @@ import { useRef, useCallback, useMemo } from 'react';
 import { PlacedComponent } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
 
-/** One data point captured per tick. */
+/** One data point (sim time in ms, signed voltage). */
 export interface TracePoint {
   time: number;   // ms
   voltage: number;
@@ -17,7 +17,9 @@ export interface Trace {
 }
 
 const TRACE_COLORS = ['#4ade80', '#60a5fa', '#fbbf24', '#f472b6', '#c084fc', '#ef4444'];
-const MAX_POINTS = 200;
+// The engine delivers samples from every sub-step (at most one per 2 ms of
+// sim time), so this keeps about the last 8 s of signal.
+const MAX_POINTS = 4000;
 const CHART_W = 600;
 const CHART_H = 140;
 const PAD_L = 40;
@@ -169,6 +171,27 @@ export function useOscilloscope() {
     tracesRef.current.delete(componentId);
   }, []);
 
+  /**
+   * Add the samples the engine recorded during the last advance (one per
+   * sub-step, signed). Probes without engine samples fall back to the
+   * component's state.voltage at the end of the advance.
+   */
+  const recordSamples = useCallback((samples: Map<string, TracePoint[]>, components: PlacedComponent[], simTime: number) => {
+    for (const compId of probedRef.current) {
+      const data = tracesRef.current.get(compId);
+      if (!data) continue;
+      const s = samples.get(compId);
+      if (s && s.length > 0) {
+        for (const p of s) data.push(p);
+      } else {
+        const comp = components.find((c) => c.id === compId);
+        if (!comp) continue;
+        data.push({ time: simTime, voltage: Number(comp.state?.voltage ?? 0) });
+      }
+      if (data.length > MAX_POINTS) data.splice(0, data.length - MAX_POINTS);
+    }
+  }, []);
+
   const recordTick = useCallback((components: PlacedComponent[], simTime: number) => {
     for (const compId of probedRef.current) {
       const comp = components.find((c) => c.id === compId);
@@ -207,5 +230,5 @@ export function useOscilloscope() {
     return result;
   }, []);
 
-  return { probedIds: probedRef.current, addProbe, removeProbe, recordTick, clearTraces, getTraces };
+  return { probedIds: probedRef.current, addProbe, removeProbe, recordTick, recordSamples, clearTraces, getTraces };
 }

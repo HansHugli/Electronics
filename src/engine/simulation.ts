@@ -3,263 +3,141 @@ import { PlacedComponent, Wire } from '../types';
 // Re-export the simulator for backward compat
 export { CircuitSimulator } from './CircuitSimulator';
 
+/*
+ * Demo circuits. Coordinates: a breadboard hole (col, row) is at pixel
+ * x = 96 + col·24 + 12, y = row·17 + 8.5. Board 0 columns: 0 (+ rail),
+ * 1 (− rail), 2-6 left strips, 7 gap, 8-12 right strips, 13 (+), 14 (−).
+ * Board 1 is the same shifted by 16 columns (rails 16/17 and 29/30).
+ *
+ * Each rail column is one connected strip along the whole board, so power
+ * needs one wire from the supply to each rail. DIP chips sit across the
+ * centre gap with pin 1 at the top-left (pins count down the left side and
+ * back up the right side, like a real chip).
+ */
+
 /** Board pin hole shorthand */
 const bh = (col: number, row: number) => ({ componentId: 'board', pinId: `${col},${row}` });
+/** Pin of a component */
+const cp = (componentId: string, pinId: string) => ({ componentId, pinId });
 
-/**
- * Create rail jumper wires linking adjacent 5-row rail groups.
- * On a real breadboard, users run a wire along the entire rail.
- * This connects groups 0-1, 1-2, 2-3, etc. for both + and - rails.
- */
-function railJumpers(posCol: number, negCol: number, fromGroup: number, toGroup: number, idPrefix: string): Wire[] {
-  const wires: Wire[] = [];
-  for (let g = fromGroup; g < toGroup; g++) {
-    const row1 = g * 5 + 4;       // last row of group g
-    const row2 = (g + 1) * 5;     // first row of group g+1
-    wires.push(
-      { id: `${idPrefix}rj+${g}`, from: bh(posCol, row1), to: bh(posCol, row2), waypoints: [], color: '#ef4444' },
-      { id: `${idPrefix}rj-${g}`, from: bh(negCol, row1), to: bh(negCol, row2), waypoints: [], color: '#60a5fa' },
-    );
-  }
-  return wires;
+function w(id: string, from: { componentId: string; pinId: string }, to: { componentId: string; pinId: string }, color: string): Wire {
+  return { id, from, to, waypoints: [], color };
+}
+const RED = '#ef4444', BLUE = '#60a5fa', YELLOW = '#fbbf24', GREEN = '#4ade80', ORANGE = '#fb923c', PURPLE = '#8b5cf6', LIME = '#22c55e';
+
+/** Position of a 2-pin vertical part (resistor, capacitor, LED) whose top pin sits on hole (col, row). */
+function vPos(col: number, row: number): { x: number; y: number } {
+  return { x: 96 + col * 24, y: row * 17 + 8.5 };
+}
+/** Position of a DIP chip straddling the gap: left pins on `col`, right pins on col+2, pin 1 on `topRow`. */
+function chipTop(col: number, topRow: number): { x: number; y: number } {
+  return { x: 96 + col * 24 + 12, y: topRow * 17 };
 }
 
 /**
- * LED blink demo: 555 astable → resistor → LED
- * Power distributed via board 0 left rail.
+ * LED blink demo: 555 astable → resistor → LED.
  *
- * Standard 555 astable topology:
- *   VCC → Ra → nodeA (DIS) → Rb → nodeB (THR=TRIG=Cap+) → Cap → GND
- *
- * Physical layout (board 0):
- *   Timer at cols 6-8, rows 5-8.  Pin grid positions:
- *     Left:  RST(6,5)  OUT(6,6)  TRIG(6,7)  GND(6,8)
- *     Right: VCC(8,5)  DIS(8,6)  THR(8,7)   CTRL(8,8)
- *
- *   Ra at col 10, rows 4→6:  pin A right-row 4, pin B right-row 6 (=DIS strip → nodeA)
- *   Rb at col 11, rows 6→8:  pin A right-row 6 (nodeA),  pin B right-row 8
- *   Wire Rb-B → THR to form nodeB (right-row 7 + left-row 7 via THR↔TRIG)
- *   C1 at col 4, rows 7-8:   pos left-row 7 (=TRIG strip → nodeB), neg left-row 8 (=GND strip)
+ * Board 0, 555 across the gap at rows 5-8:
+ *   Left  (col 6): GND(5) TRIG(6) OUT(7) RST(8)
+ *   Right (col 8): VCC(5) DIS(6)  THR(7) CTRL(8)
+ * Timing network (standard astable): VCC → Ra → DIS → Rb → THR/TRIG/C1 → GND.
+ * OUT (row 7 strip) → 220 Ω → LED → − rail.
  */
 export function createBlinkDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  function vPos(col: number, row: number): { x: number; y: number } {
-    return { x: 96 + col * 24, y: row * 17 + 8.5 };
-  }
-  function timerPos(col: number, gndRow: number): { x: number; y: number } {
-    return { x: 96 + col * 24 + 12, y: gndRow * 17 + 8.5 - 4 * 17 * 7 / 8 };
-  }
+  return create555Blinker({ ra: 47000, rb: 68000, c: 47, withLed: true });
+}
 
+function create555Blinker(opts: { ra: number; rb: number; c: number; withLed: boolean }): { components: PlacedComponent[]; wires: Wire[] } {
   const components: PlacedComponent[] = [
     {
       id: 'power1', type: 'power',
       position: { x: 0, y: 85 }, rotation: 0,
-      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+      properties: { voltage: 5, mode: 'DC', waveform: 'square', frequency: 1 },
       state: {},
     },
-    // 555 Timer: left pins col 6, right pins col 8, rows 5-8
-    {
-      id: 'timer1', type: 'timer',
-      position: timerPos(6, 8), rotation: 0,
-      properties: {},
-      state: { outputHigh: 0 },
-    },
-    // Ra (47k): col 10, rows 4→6 — VCC → nodeA (DIS strip, right row 6)
-    {
-      id: 'ra', type: 'resistor',
-      position: vPos(10, 4), rotation: 0,
-      properties: { resistance: 47000 },
-      state: {},
-    },
-    // Rb (68k): col 11, rows 6→8 — nodeA (right row 6) → right row 8, wired to THR (nodeB)
-    {
-      id: 'rb', type: 'resistor',
-      position: vPos(11, 6), rotation: 0,
-      properties: { resistance: 68000 },
-      state: {},
-    },
-    // C1 (47μF): col 4, rows 7-8 — pos at left row 7 (TRIG strip = nodeB), neg at left row 8 (GND strip)
-    {
-      id: 'c1', type: 'capacitor',
-      position: vPos(4, 7), rotation: 0,
-      properties: { capacitance: 47 },
-      state: {},
-    },
-    // R_led (220Ω): col 4, rows 10-12
-    {
-      id: 'rled', type: 'resistor',
-      position: vPos(4, 10), rotation: 0,
-      properties: { resistance: 220 },
-      state: {},
-    },
-    // LED: col 4, row 13
-    {
-      id: 'led1', type: 'led',
-      position: vPos(4, 13), rotation: 0,
-      properties: { forwardVoltage: 2.0, color: 'red' },
-      state: { on: 0 },
-    },
+    { id: 'timer1', type: 'timer', position: chipTop(6, 5), rotation: 0, properties: {}, state: { outputHigh: 0 } },
+    // Ra: right strips rows 4 → 6 (bottom pin on the DIS strip)
+    { id: 'ra', type: 'resistor', position: vPos(10, 4), rotation: 0, properties: { resistance: opts.ra }, state: {} },
+    // Rb: right strips rows 10 → 12, wired DIS → Rb → THR
+    { id: 'rb', type: 'resistor', position: vPos(11, 10), rotation: 0, properties: { resistance: opts.rb }, state: {} },
+    // C1: right strips rows 12-13 (+ on Rb's lower strip = THR/TRIG node, − to the − rail)
+    { id: 'c1', type: 'capacitor', position: vPos(9, 12), rotation: 0, properties: { capacitance: opts.c }, state: {} },
   ];
+  if (opts.withLed) {
+    components.push(
+      // R_led: left strips rows 7 → 9 (top pin on the OUT strip)
+      { id: 'rled', type: 'resistor', position: vPos(4, 7), rotation: 0, properties: { resistance: 220 }, state: {} },
+      // LED: anode on row 9 (R_led's lower strip), cathode on row 10
+      { id: 'led1', type: 'led', position: vPos(4, 9), rotation: 0, properties: { forwardVoltage: 0, color: 'red' }, state: { on: 0 } },
+    );
+  }
 
   const wires: Wire[] = [
-    // === Power → left rail (row 5, group 1) ===
-    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
-    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 5), waypoints: [], color: '#60a5fa' },
-
-    // === VCC to 555: + rail → right comp strip row 5 ===
-    { id: 'w3', from: bh(0, 5), to: bh(9, 5), waypoints: [], color: '#ef4444' },
-    // === GND to 555: - rail → left comp strip row 8 (GND pin + C1 neg share this strip) ===
-    { id: 'w4', from: bh(1, 8), to: bh(3, 8), waypoints: [], color: '#60a5fa' },
-
-    // RST → VCC (across gap, both row 5)
-    { id: 'w5', from: { componentId: 'timer1', pinId: 'reset' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-
-    // === Timing network (correct 555 astable: VCC→Ra→DIS→Rb→THR/TRIG/Cap→GND) ===
-    // Ra top → VCC rail (Ra-A at right row 4 → +rail)
-    { id: 'w6', from: { componentId: 'ra', pinId: 'a' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
-    // Rb bottom → THR (connects nodeA→Rb→nodeB where THR/TRIG/Cap live)
-    { id: 'w7', from: { componentId: 'rb', pinId: 'b' }, to: { componentId: 'timer1', pinId: 'thr' }, waypoints: [], color: '#4ade80' },
-    // THR → TRIG (across gap — nodeB spans both comp strips at row 7)
-    { id: 'w8', from: { componentId: 'timer1', pinId: 'thr' }, to: { componentId: 'timer1', pinId: 'trig' }, waypoints: [], color: '#4ade80' },
-    // (Ra-B and Rb-A share right strip row 6 with DIS → nodeA is automatic via breadboard)
-    // (C1 pos shares left strip row 7 with TRIG → nodeB is automatic via breadboard)
-    // (C1 neg shares left strip row 8 with GND → ground is automatic via breadboard)
-
-    // Link rail group 1 (rows 5-9) to group 2 (rows 10-14) for LED GND
-    ...railJumpers(0, 1, 1, 2, 'b0'),
-    // OUT → R_led A
-    { id: 'w10', from: { componentId: 'timer1', pinId: 'out' }, to: { componentId: 'rled', pinId: 'a' }, waypoints: [], color: '#fbbf24' },
-    // R_led B → LED anode
-    { id: 'w11', from: { componentId: 'rled', pinId: 'b' }, to: { componentId: 'led1', pinId: 'anode' }, waypoints: [], color: '#fbbf24' },
-    // LED cathode → GND rail (group 2)
-    { id: 'w12', from: { componentId: 'led1', pinId: 'cathode' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
+    // Supply → left rails (each rail is connected along its whole length)
+    w('w1', cp('power1', 'pos'), bh(0, 2), RED),
+    w('w2', cp('power1', 'neg'), bh(1, 2), BLUE),
+    // Right rails of board 0 too (Ra and C1 sit on the right side)
+    w('w1r', bh(0, 0), bh(13, 0), RED),
+    w('w2r', bh(1, 0), bh(14, 0), BLUE),
+    // 555 VCC (right strip row 5) and GND (left strip row 5)
+    w('w3', bh(13, 5), bh(12, 5), RED),
+    w('w4', bh(1, 5), bh(2, 5), BLUE),
+    // RESET → VCC (keep the timer enabled)
+    w('w5', cp('timer1', 'reset'), cp('timer1', 'vcc'), RED),
+    // Ra top → + rail
+    w('w6', cp('ra', 'a'), bh(13, 4), RED),
+    // DIS → Rb, Rb → THR, THR → TRIG
+    w('w7', cp('timer1', 'dis'), cp('rb', 'a'), GREEN),
+    w('w7b', cp('rb', 'b'), cp('timer1', 'thr'), GREEN),
+    w('w8', cp('timer1', 'thr'), cp('timer1', 'trig'), GREEN),
+    // C1 − (right strip row 13) → − rail
+    w('w9', bh(10, 13), bh(14, 13), BLUE),
   ];
-
+  if (opts.withLed) {
+    // LED cathode strip (left row 10) → − rail
+    wires.push(w('w12', bh(2, 10), bh(1, 10), BLUE));
+  }
   return { components, wires };
 }
 
 /**
- * 7-segment counter demo: 555 astable → CD4026 → 7-seg display
- * Power via board 0 left rail, jumpered to board 1 left rail.
+ * 7-segment counter demo: 555 astable → CD4026 → 7-segment display.
  *
- * Same corrected 555 astable topology as blink demo:
- *   VCC → Ra → nodeA (DIS, right row 6) → Rb → nodeB (THR=TRIG=Cap+) → Cap → GND
+ * Board 1, CD4026 across the gap at rows 14-21:
+ *   Left  (col 22): CLK(14) INH(15) DEI(16) DEO(17) CO(18) f(19) g(20) VSS(21)
+ *   Right (col 24): VDD(14) RST(15) C̄(16) c(17) b(18) e(19) a(20) d(21)
+ * Display at rows 25-29 (common cathode):
+ *   Left  (col 22): e(25) d(26) COM(27) c(28) DP(29)
+ *   Right (col 24): g(25) f(26) COM(27) a(28) b(29)
+ * The CD4026's outputs are current-limited, so it drives the segments directly.
  */
 export function createCounterDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  function vPos(col: number, row: number): { x: number; y: number } {
-    return { x: 96 + col * 24, y: row * 17 + 8.5 };
-  }
-  function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
-    const h = height * 17;
-    const maxOffset = (height * 2 - 1) / (height * 2);
-    return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
-  }
-
+  const base = create555Blinker({ ra: 10000, rb: 68000, c: 47, withLed: false });
   const components: PlacedComponent[] = [
-    {
-      id: 'power1', type: 'power',
-      position: { x: 0, y: 85 }, rotation: 0,
-      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
-      state: {},
-    },
-    // 555 Timer: board 0, cols 6-8, rows 5-8
-    {
-      id: 'timer1', type: 'timer',
-      position: { x: 96 + 6 * 24 + 12, y: 8 * 17 + 8.5 - 4 * 17 * 7 / 8 },
-      rotation: 0, properties: {}, state: { outputHigh: 0 },
-    },
-    // Ra (10k): col 10, rows 4→6 — VCC → nodeA (DIS strip, right row 6)
-    {
-      id: 'ra', type: 'resistor',
-      position: vPos(10, 4), rotation: 0,
-      properties: { resistance: 10000 }, state: {},
-    },
-    // Rb (68k): col 11, rows 6→8 — nodeA (right row 6) → right row 8, wired to THR (nodeB)
-    {
-      id: 'rb', type: 'resistor',
-      position: vPos(11, 6), rotation: 0,
-      properties: { resistance: 68000 }, state: {},
-    },
-    // C1 (47μF): col 4, rows 7-8 — pos at left row 7 (TRIG strip = nodeB), neg at left row 8 (GND strip)
-    {
-      id: 'c1', type: 'capacitor',
-      position: vPos(4, 7), rotation: 0,
-      properties: { capacitance: 47 }, state: {},
-    },
-    // CD4026: board 1, cols 22-24, rows 14-21
-    {
-      id: 'counter1', type: 'cd4026',
-      position: chipPos(22, 21, 8),
-      rotation: 0, properties: {}, state: { count: 0 },
-    },
-    // 7-Seg display: board 1, cols 22-24, rows 25-29
-    {
-      id: 'display1', type: 'display7seg',
-      position: chipPos(22, 29, 5),
-      rotation: 0, properties: {}, state: {},
-    },
+    ...base.components,
+    { id: 'counter1', type: 'cd4026', position: chipTop(22, 14), rotation: 0, properties: {}, state: { count: 0 } },
+    { id: 'display1', type: 'display7seg', position: chipTop(22, 25), rotation: 0, properties: { color: 'red' }, state: {} },
   ];
-
+  const segs = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
   const wires: Wire[] = [
-    // === Power → board 0 left rail ===
-    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
-    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 5), waypoints: [], color: '#60a5fa' },
-
-    // Link board 0 rail groups so all rows have power
-    ...railJumpers(0, 1, 1, 3, 'b0'),
-
-    // === 555 power via rail ===
-    { id: 'w3', from: bh(0, 5), to: bh(9, 5), waypoints: [], color: '#ef4444' },
-    { id: 'w4', from: bh(1, 8), to: bh(3, 8), waypoints: [], color: '#60a5fa' },
-
-    // === 555 timing (correct astable: VCC→Ra→DIS→Rb→THR/TRIG/Cap→GND) ===
-    { id: 'w5', from: { componentId: 'timer1', pinId: 'reset' }, to: { componentId: 'timer1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    // Ra top → VCC rail
-    { id: 'w6', from: { componentId: 'ra', pinId: 'a' }, to: bh(0, 5), waypoints: [], color: '#ef4444' },
-    // Rb bottom → THR (nodeB)
-    { id: 'w7', from: { componentId: 'rb', pinId: 'b' }, to: { componentId: 'timer1', pinId: 'thr' }, waypoints: [], color: '#4ade80' },
-    // THR → TRIG (across gap — nodeB)
-    { id: 'w8', from: { componentId: 'timer1', pinId: 'thr' }, to: { componentId: 'timer1', pinId: 'trig' }, waypoints: [], color: '#4ade80' },
-    // (Ra-B + Rb-A + DIS share right strip row 6 → nodeA automatic)
-    // (C1 pos + TRIG share left strip row 7 → nodeB automatic)
-    // (C1 neg + GND share left strip row 8 → ground automatic)
-
-    // === Bridge board 0 rail → board 1 rail ===
-    // Board 1 left rail: col 16 (+), col 17 (-)
-    { id: 'w15', from: bh(0, 14), to: bh(16, 14), waypoints: [], color: '#ef4444' },
-    { id: 'w16', from: bh(1, 14), to: bh(17, 14), waypoints: [], color: '#60a5fa' },
-
-    // Link board 1 rail groups so CD4026 and 7-seg can reach power
-    ...railJumpers(16, 17, 2, 6, 'b1'),
-
-    // === CD4026 power ===
-    // VCC: board 1 + rail → right comp strip (where VCC pin sits)
-    { id: 'w20', from: bh(16, 14), to: bh(25, 14), waypoints: [], color: '#ef4444' },
-    // GND: board 1 - rail → left comp strip row 14 (where GND pin at col 22 sits)
-    { id: 'w21', from: bh(17, 14), to: bh(19, 14), waypoints: [], color: '#60a5fa' },
-    // RST (right side, offset 9/16 → row 18) → GND rail
-    { id: 'w22', from: { componentId: 'counter1', pinId: 'rst' }, to: bh(17, 18), waypoints: [], color: '#60a5fa' },
-    // INH (left side, offset 13/16 → row 20) → GND rail
-    { id: 'w23', from: { componentId: 'counter1', pinId: 'inh' }, to: bh(17, 20), waypoints: [], color: '#60a5fa' },
-    // EN (left side, offset 11/16 → row 19) → VCC rail
-    { id: 'w24', from: { componentId: 'counter1', pinId: 'en' }, to: bh(16, 19), waypoints: [], color: '#ef4444' },
-
-    // === 555 OUT → CD4026 CLK ===
-    { id: 'w30', from: { componentId: 'timer1', pinId: 'out' }, to: { componentId: 'counter1', pinId: 'clk' }, waypoints: [], color: '#fbbf24' },
-
-    // === CD4026 → 7-Seg ===
-    { id: 'w40', from: { componentId: 'counter1', pinId: 'out_a' }, to: { componentId: 'display1', pinId: 'a' }, waypoints: [], color: '#fb923c' },
-    { id: 'w41', from: { componentId: 'counter1', pinId: 'out_b' }, to: { componentId: 'display1', pinId: 'b' }, waypoints: [], color: '#fb923c' },
-    { id: 'w42', from: { componentId: 'counter1', pinId: 'out_c' }, to: { componentId: 'display1', pinId: 'c' }, waypoints: [], color: '#fb923c' },
-    { id: 'w43', from: { componentId: 'counter1', pinId: 'out_d' }, to: { componentId: 'display1', pinId: 'd' }, waypoints: [], color: '#fb923c' },
-    { id: 'w44', from: { componentId: 'counter1', pinId: 'out_e' }, to: { componentId: 'display1', pinId: 'e' }, waypoints: [], color: '#fb923c' },
-    { id: 'w45', from: { componentId: 'counter1', pinId: 'out_f' }, to: { componentId: 'display1', pinId: 'f' }, waypoints: [], color: '#fb923c' },
-    { id: 'w46', from: { componentId: 'counter1', pinId: 'out_g' }, to: { componentId: 'display1', pinId: 'g' }, waypoints: [], color: '#fb923c' },
-
-    // === 7-Seg power ===
-    { id: 'w50', from: bh(16, 27), to: bh(25, 27), waypoints: [], color: '#ef4444' },
-    { id: 'w51', from: bh(17, 27), to: bh(19, 27), waypoints: [], color: '#60a5fa' },
+    ...base.wires,
+    // Board 0 rails → board 1 left rails
+    w('w15', bh(0, 30), bh(16, 30), RED),
+    w('w16', bh(1, 31), bh(17, 31), BLUE),
+    // CD4026 power: VDD (right strip row 14), VSS (left strip row 21)
+    w('w20', bh(16, 13), bh(28, 14), RED),
+    w('w21', bh(17, 21), bh(18, 21), BLUE),
+    // RST and INH low, DEI (display enable) high
+    w('w22', cp('counter1', 'rst'), bh(17, 15), BLUE),
+    w('w23', cp('counter1', 'inh'), bh(17, 16), BLUE),
+    w('w24', cp('counter1', 'en'), bh(16, 17), RED),
+    // 555 OUT → CD4026 CLK
+    w('w30', cp('timer1', 'out'), cp('counter1', 'clk'), YELLOW),
+    // CD4026 → display segments
+    ...segs.map((s, i) => w(`w4${i}`, cp('counter1', `out_${s}`), cp('display1', s), ORANGE)),
+    // Display common cathode (left strip row 27) → − rail
+    w('w51', bh(17, 27), bh(18, 27), BLUE),
   ];
-
   return { components, wires };
 }
 
@@ -394,87 +272,53 @@ export const AVR_MATRIX_HEX = [
   ':00000001FF',
 ].join('\n');
 
+
+/** ATmega328P power wiring shared by the AVR demos (chip at cols 6/8, rows 7-20). */
+function avrPowerWires(prefix: string): Wire[] {
+  // Left col 6: RST(7) D0(8) D1(9) D2(10) D3(11) D4(12) VCC(13) GND(14) XTAL1(15) XTAL2(16) D5(17) D6(18) D7(19) D8(20)
+  // Right col 8: A5(7) A4(8) A3(9) A2(10) A1(11) A0(12) GND(13) AREF(14) AVCC(15) D13(16) D12(17) D11(18) D10(19) D9(20)
+  return [
+    w(`${prefix}1`, cp('power1', 'pos'), bh(0, 3), RED),
+    w(`${prefix}2`, cp('power1', 'neg'), bh(1, 3), BLUE),
+    // Right rails of board 0
+    w(`${prefix}1r`, bh(0, 0), bh(13, 0), RED),
+    w(`${prefix}2r`, bh(1, 0), bh(14, 0), BLUE),
+    // VCC (left strip row 13) and GND (left strip row 14)
+    w(`${prefix}3`, bh(0, 13), bh(2, 13), RED),
+    w(`${prefix}4`, bh(1, 14), bh(2, 14), BLUE),
+    // AVCC (right strip row 15) and the second GND (right strip row 13)
+    w(`${prefix}5`, bh(13, 15), bh(12, 15), RED),
+    w(`${prefix}6`, bh(14, 13), bh(12, 13), BLUE),
+    // RESET (pin 1) → VCC: keep the chip running
+    w(`${prefix}7`, cp('avr1', 'pc6'), cp('avr1', 'vcc'), RED),
+  ];
+}
+
 /**
  * ATmega328P blink demo: Arduino-style LED blink on pin D13 (PB5).
  * Pre-loaded with hand-assembled AVR machine code (no compilation needed).
  *
- * Physical layout (board 0):
- *   ATmega328P at cols 6-8, rows 7-20 (DIP-28 straddling center gap)
- *   Pin grid positions (lastRow = 20):
- *     Left:  RST(6,20) D0(6,19) … VCC(6,14) GND(6,13) … D8(6,7)
- *     Right: D9(8,20)  D10(8,19) … D13(8,16) AVCC(8,15) AREF(8,14) GND(8,13) … A5(8,7)
- *
- *   Resistor (220 Ω) at col 10, rows 16→18:  pin A right-row 16 (=D13 strip)
- *   LED at col 10, rows 18-19:  anode right-row 18 (=R.b strip), cathode right-row 19
+ * ATmega328P across the gap at cols 6/8, rows 7-20 (pin 1 = RST top-left).
+ * D13 is the right-side pin on row 16; a 220 Ω resistor runs from that strip
+ * (rows 16 → 18) to the LED (anode row 18, cathode row 19 → − rail).
  */
 export function createAVRBlinkDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  function vPos(col: number, row: number): { x: number; y: number } {
-    return { x: 96 + col * 24, y: row * 17 + 8.5 };
-  }
-  function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
-    const h = height * 17;
-    const maxOffset = (height * 2 - 1) / (height * 2);
-    return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
-  }
-
   const components: PlacedComponent[] = [
     {
       id: 'power1', type: 'power',
       position: { x: 0, y: 200 }, rotation: 0,
-      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+      properties: { voltage: 5, mode: 'DC', waveform: 'square', frequency: 1 },
       state: {},
     },
-    // ATmega328P: cols 6-8, rows 7-20
-    {
-      id: 'avr1', type: 'atmega328',
-      position: chipPos(6, 20, 14), rotation: 0,
-      properties: { clockSpeed: 16000000 },
-      state: {},
-    },
-    // R1 (220 Ω): col 10, rows 16→18 — D13 strip (right row 16) to LED
-    {
-      id: 'r1', type: 'resistor',
-      position: vPos(10, 16), rotation: 0,
-      properties: { resistance: 220 },
-      state: {},
-    },
-    // LED: col 10, row 18 — anode right-row 18, cathode right-row 19
-    {
-      id: 'led1', type: 'led',
-      position: vPos(10, 18), rotation: 0,
-      properties: { forwardVoltage: 2.0, color: 'red' },
-      state: { on: 0 },
-    },
+    { id: 'avr1', type: 'atmega328', position: chipTop(6, 7), rotation: 0, properties: { clockSpeed: 16000000 }, state: {} },
+    { id: 'r1', type: 'resistor', position: vPos(10, 16), rotation: 0, properties: { resistance: 220 }, state: {} },
+    { id: 'led1', type: 'led', position: vPos(10, 18), rotation: 0, properties: { forwardVoltage: 0, color: 'red' }, state: { on: 0 } },
   ];
-
   const wires: Wire[] = [
-    // === Power → left rail (group 2, rows 10-14) ===
-    { id: 'w1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
-    { id: 'w2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
-
-    // === VCC (left strip row 14): + rail → left comp strip ===
-    { id: 'w3', from: bh(0, 14), to: bh(3, 14), waypoints: [], color: '#ef4444' },
-    // === GND (left strip row 13): - rail → left comp strip ===
-    { id: 'w4', from: bh(1, 13), to: bh(3, 13), waypoints: [], color: '#60a5fa' },
-
-    // === AVCC (right strip row 15): + rail → right comp strip ===
-    { id: 'w5', from: bh(0, 15), to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    // === AGND (right strip row 13): - rail → right comp strip ===
-    { id: 'w6', from: bh(1, 13), to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-
-    // === RST → VCC (keep chip out of reset) ===
-    { id: 'w7', from: { componentId: 'avr1', pinId: 'pc6' }, to: { componentId: 'avr1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-
-    // Rail jumpers: link group 2 (rows 10-14) → group 3 (rows 15-19) for AVCC + LED GND
-    ...railJumpers(0, 1, 2, 3, 'b0'),
-
-    // === LED circuit ===
-    // D13 (right row 16) → R1 A (right row 16): automatic via breadboard strip
-    // R1 B (right row 18) → LED anode (right row 18): automatic via breadboard strip
-    // LED cathode (right row 19) → GND rail
-    { id: 'w10', from: { componentId: 'led1', pinId: 'cathode' }, to: bh(1, 19), waypoints: [], color: '#60a5fa' },
+    ...avrPowerWires('w'),
+    // LED cathode (right strip row 19) → − rail
+    w('w10', cp('led1', 'cathode'), bh(14, 19), BLUE),
   ];
-
   return { components, wires };
 }
 
@@ -482,119 +326,64 @@ export function createAVRBlinkDemoCircuit(): { components: PlacedComponent[]; wi
  * 5x7 LED Matrix demo: ATmega328P + 74HC595 shift register driving LED matrix
  * Shows animated patterns on the 5x7 LED matrix display.
  *
- * Layout:
- * - ATmega328P at cols 6-8, rows 7-20
- * - 74HC595 at cols 12-14, rows 10-17 (for column anodes)
- * - 5x7 Matrix at cols 18-20, rows 12-18
+ * - ATmega328P at cols 6/8, rows 7-20 (board 0)
+ * - 74HC595 at cols 22/24, rows 7-14 (board 1):
+ *     Left:  QB(7) QC(8) QD(9) QE(10) QF(11) QG(12) QH(13) GND(14)
+ *     Right: VCC(7) QA(8) SER(9) OE(10) RCLK(11) SRCLK(12) SRCLR(13) QH'(14)
+ * - 5x7 matrix at cols 22/24, rows 16-22 (board 1); columns are anodes
+ *   (from the 595), rows are cathodes (from the ATmega)
  */
 export function createMatrixDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  function vPos(col: number, row: number): { x: number; y: number } {
-    return { x: 96 + col * 24, y: row * 17 + 8.5 };
-  }
-  function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
-    const h = height * 17;
-    const maxOffset = (height * 2 - 1) / (height * 2);
-    return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
-  }
-
   const components: PlacedComponent[] = [
     {
       id: 'power1', type: 'power',
       position: { x: 0, y: 200 }, rotation: 0,
-      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+      properties: { voltage: 5, mode: 'DC', waveform: 'square', frequency: 1 },
       state: {},
     },
-    // ATmega328P: cols 6-8, rows 7-20
-    {
-      id: 'avr1', type: 'atmega328',
-      position: chipPos(6, 20, 14), rotation: 0,
-      properties: { clockSpeed: 16000000 },
-      state: {},
-    },
-    // 74HC595 Shift Register: board 1, straddles gap col 23, rows 7-14.
-    // Both pin rows must be in component areas (NOT power rails) and in
-    // different left/right component groups, otherwise the breadboard's per-
-    // row strip wiring shorts them together. chipPos col=22 puts left pins on
-    // col 22 (board 1 left-comp) and right pins on col 24 (board 1 right-comp).
-    {
-      id: 'shift1', type: 'shift_register',
-      position: chipPos(22, 14, 8), rotation: 0,
-      properties: {},
-      state: {},
-    },
-    // 5x7 LED Matrix: board 1, straddles gap col 23, rows 16-22.
-    // Stacked below shift1 (rows 7-14) to avoid sharing any horizontal strips.
-    {
-      id: 'matrix1', type: 'ledmatrix',
-      position: chipPos(22, 22, 7), rotation: 0,
-      properties: { color: 'red' },
-      state: {},
-    },
+    { id: 'avr1', type: 'atmega328', position: chipTop(6, 7), rotation: 0, properties: { clockSpeed: 16000000 }, state: {} },
+    { id: 'shift1', type: 'shift_register', position: chipTop(22, 7), rotation: 0, properties: {}, state: {} },
+    { id: 'matrix1', type: 'ledmatrix', position: chipTop(22, 16), rotation: 0, properties: { color: 'red' }, state: {} },
   ];
 
   const wires: Wire[] = [
-    // === Power → left rail (group 2, rows 10-14) ===
-    { id: 'm1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
-    { id: 'm2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
+    ...avrPowerWires('m'),
 
-    // === VCC (left strip row 14): + rail → left comp strip ===
-    { id: 'm3', from: bh(0, 14), to: bh(3, 14), waypoints: [], color: '#ef4444' },
-    // === GND (left strip row 13): - rail → left comp strip ===
-    { id: 'm4', from: bh(1, 13), to: bh(3, 13), waypoints: [], color: '#60a5fa' },
-
-    // === AVCC (right strip row 15): + rail → right comp strip ===
-    { id: 'm5', from: bh(0, 15), to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    // === AGND (right strip row 13): - rail → right comp strip ===
-    { id: 'm6', from: bh(1, 13), to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-
-    // === AVR power rails ===
-    { id: 'm7', from: { componentId: 'avr1', pinId: 'vcc' }, to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    { id: 'm8', from: { componentId: 'avr1', pinId: 'gnd' }, to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-    { id: 'm9', from: { componentId: 'avr1', pinId: 'avcc' }, to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    { id: 'm10', from: { componentId: 'avr1', pinId: 'agnd' }, to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-
-    // === RST → VCC (keep chip out of reset) ===
-    { id: 'm11', from: { componentId: 'avr1', pinId: 'pc6' }, to: { componentId: 'avr1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-
-    // Rail jumpers: link group 2 (rows 10-14) → group 3 (rows 15-19) for AVCC + matrix power
-    ...railJumpers(0, 1, 2, 3, 'b0'),
+    // Board 0 rails → board 1 left rails
+    w('m15r', bh(0, 30), bh(16, 30), RED),
+    w('m16r', bh(1, 31), bh(17, 31), BLUE),
+    // 74HC595 power: VCC (right strip row 7) and GND (left strip row 14)
+    w('m17', bh(16, 6), bh(28, 7), RED),
+    w('m18', bh(17, 14), bh(18, 14), BLUE),
 
     // === ATmega328P → 74HC595 ===
-    // D11 (PB3) → SER (serial data)
-    { id: 'm12', from: { componentId: 'avr1', pinId: 'pb3' }, to: { componentId: 'shift1', pinId: 'ser' }, waypoints: [], color: '#fbbf24' },
-    // D12 (PB4) → SRCLK (shift clock)
-    { id: 'm13', from: { componentId: 'avr1', pinId: 'pb4' }, to: { componentId: 'shift1', pinId: 'srclk' }, waypoints: [], color: '#fbbf24' },
-    // D8 (PB0) → RCLK (latch clock)
-    { id: 'm14', from: { componentId: 'avr1', pinId: 'pb0' }, to: { componentId: 'shift1', pinId: 'rclk' }, waypoints: [], color: '#fbbf24' },
-    // OE → GND (always enabled)
-    { id: 'm15', from: { componentId: 'shift1', pinId: 'oe' }, to: bh(1, 13), waypoints: [], color: '#60a5fa' },
-    // SRCLR → VCC (never clear)
-    { id: 'm16', from: { componentId: 'shift1', pinId: 'srclr' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
+    // D11 (PB3) → SER, D12 (PB4) → SRCLK, D8 (PB0) → RCLK
+    w('m12', cp('avr1', 'pb3'), cp('shift1', 'ser'), YELLOW),
+    w('m13', cp('avr1', 'pb4'), cp('shift1', 'srclk'), YELLOW),
+    w('m14', cp('avr1', 'pb0'), cp('shift1', 'rclk'), YELLOW),
+    // OE → GND (outputs always enabled), SRCLR → VCC (never clear)
+    w('m15', cp('shift1', 'oe'), bh(17, 10), BLUE),
+    w('m16', cp('shift1', 'srclr'), bh(16, 13), RED),
 
     // === 74HC595 → Matrix Columns (Anodes) ===
     // The firmware shifts data LSB-first through all 8 bits, so a 5-bit
     // pattern ends up in Q3..Q7 (= QD..QH), not Q0..Q4. Wire columns to
     // those upper outputs to match.
-    { id: 'm20', from: { componentId: 'shift1', pinId: 'qd' }, to: { componentId: 'matrix1', pinId: 'c1' }, waypoints: [], color: '#22c55e' },
-    { id: 'm21', from: { componentId: 'shift1', pinId: 'qe' }, to: { componentId: 'matrix1', pinId: 'c2' }, waypoints: [], color: '#22c55e' },
-    { id: 'm22', from: { componentId: 'shift1', pinId: 'qf' }, to: { componentId: 'matrix1', pinId: 'c3' }, waypoints: [], color: '#22c55e' },
-    { id: 'm23', from: { componentId: 'shift1', pinId: 'qg' }, to: { componentId: 'matrix1', pinId: 'c4' }, waypoints: [], color: '#22c55e' },
-    { id: 'm24', from: { componentId: 'shift1', pinId: 'qh' }, to: { componentId: 'matrix1', pinId: 'c5' }, waypoints: [], color: '#22c55e' },
+    w('m20', cp('shift1', 'qd'), cp('matrix1', 'c1'), LIME),
+    w('m21', cp('shift1', 'qe'), cp('matrix1', 'c2'), LIME),
+    w('m22', cp('shift1', 'qf'), cp('matrix1', 'c3'), LIME),
+    w('m23', cp('shift1', 'qg'), cp('matrix1', 'c4'), LIME),
+    w('m24', cp('shift1', 'qh'), cp('matrix1', 'c5'), LIME),
 
     // === ATmega328P → Matrix Rows (Cathodes) ===
-    // D2 (PD2) → R1, D3 (PD3) → R2, D4 (PD4) → R3, D5 (PD5) → R4
-    { id: 'm30', from: { componentId: 'avr1', pinId: 'pd2' }, to: { componentId: 'matrix1', pinId: 'r1' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'm31', from: { componentId: 'avr1', pinId: 'pd3' }, to: { componentId: 'matrix1', pinId: 'r2' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'm32', from: { componentId: 'avr1', pinId: 'pd4' }, to: { componentId: 'matrix1', pinId: 'r3' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'm33', from: { componentId: 'avr1', pinId: 'pd5' }, to: { componentId: 'matrix1', pinId: 'r4' }, waypoints: [], color: '#8b5cf6' },
-    // D6 (PD6) → R5, D7 (PD7) → R6, D9 (PB1) → R7
-    { id: 'm34', from: { componentId: 'avr1', pinId: 'pd6' }, to: { componentId: 'matrix1', pinId: 'r5' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'm35', from: { componentId: 'avr1', pinId: 'pd7' }, to: { componentId: 'matrix1', pinId: 'r6' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'm36', from: { componentId: 'avr1', pinId: 'pb1' }, to: { componentId: 'matrix1', pinId: 'r7' }, waypoints: [], color: '#8b5cf6' },
-
-    // === Matrix Power ===
-    { id: 'm40', from: bh(0, 15), to: { componentId: 'matrix1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    { id: 'm41', from: bh(1, 15), to: { componentId: 'matrix1', pinId: 'gnd' }, waypoints: [], color: '#60a5fa' },
+    // D2..D7 → R1..R6, D9 (PB1) → R7
+    w('m30', cp('avr1', 'pd2'), cp('matrix1', 'r1'), PURPLE),
+    w('m31', cp('avr1', 'pd3'), cp('matrix1', 'r2'), PURPLE),
+    w('m32', cp('avr1', 'pd4'), cp('matrix1', 'r3'), PURPLE),
+    w('m33', cp('avr1', 'pd5'), cp('matrix1', 'r4'), PURPLE),
+    w('m34', cp('avr1', 'pd6'), cp('matrix1', 'r5'), PURPLE),
+    w('m35', cp('avr1', 'pd7'), cp('matrix1', 'r6'), PURPLE),
+    w('m36', cp('avr1', 'pb1'), cp('matrix1', 'r7'), PURPLE),
   ];
 
   return { components, wires };
@@ -854,6 +643,7 @@ export const AVR_NECKLACE_HEX = `:100000000C94A9010C94C6010C94C6010C94C60171
 :080EEA004544432020200000D4
 :00000001FF`;
 
+
 /**
  * Necklace demo circuit: ATmega328P + 5x7 LED matrix wired directly
  * (no shift register), matching the pin map in ino/necklace.ino:
@@ -866,35 +656,17 @@ export const AVR_NECKLACE_HEX = `:100000000C94A9010C94C6010C94C6010C94C60171
  * while open; pressing pulls it LOW.
  */
 export function createNecklaceDemoCircuit(): { components: PlacedComponent[]; wires: Wire[] } {
-  function chipPos(col: number, lastRow: number, height: number): { x: number; y: number } {
-    const h = height * 17;
-    const maxOffset = (height * 2 - 1) / (height * 2);
-    return { x: 96 + col * 24 + 12, y: lastRow * 17 + 8.5 - h * maxOffset };
-  }
-
   const components: PlacedComponent[] = [
     {
       id: 'power1', type: 'power',
       position: { x: 0, y: 200 }, rotation: 0,
-      properties: { voltage: 5, mode: 'DC', waveform: 'square' },
+      properties: { voltage: 5, mode: 'DC', waveform: 'square', frequency: 1 },
       state: {},
     },
-    // ATmega328P: cols 6-8, rows 7-20
-    {
-      id: 'avr1', type: 'atmega328',
-      position: chipPos(6, 20, 14), rotation: 0,
-      properties: { clockSpeed: 16000000 },
-      state: {},
-    },
-    // 5x7 LED Matrix: board 1, straddles gap col 23, rows 16-22
-    {
-      id: 'matrix1', type: 'ledmatrix',
-      position: chipPos(22, 22, 7), rotation: 0,
-      properties: { color: 'red' },
-      state: {},
-    },
-    // Momentary "Next mode" pushbutton: wired between PB1 (D9) and GND.
-    // Placed just above the matrix on board 1 right side.
+    { id: 'avr1', type: 'atmega328', position: chipTop(6, 7), rotation: 0, properties: { clockSpeed: 16000000 }, state: {} },
+    // 5x7 LED Matrix: board 1, across the gap at rows 16-22
+    { id: 'matrix1', type: 'ledmatrix', position: chipTop(22, 16), rotation: 0, properties: { color: 'red' }, state: {} },
+    // Momentary "Next mode" pushbutton (board 1, col 20, rows 9-10), wired between PB1 (D9) and GND
     {
       id: 'btn1', type: 'switch',
       position: { x: 96 + 20 * 24, y: 9 * 17 + 8.5 }, rotation: 0,
@@ -904,23 +676,7 @@ export function createNecklaceDemoCircuit(): { components: PlacedComponent[]; wi
   ];
 
   const wires: Wire[] = [
-    // === Power → left rail ===
-    { id: 'n1', from: { componentId: 'power1', pinId: 'pos' }, to: bh(0, 14), waypoints: [], color: '#ef4444' },
-    { id: 'n2', from: { componentId: 'power1', pinId: 'neg' }, to: bh(1, 14), waypoints: [], color: '#60a5fa' },
-    { id: 'n3', from: bh(0, 14), to: bh(3, 14), waypoints: [], color: '#ef4444' },
-    { id: 'n4', from: bh(1, 13), to: bh(3, 13), waypoints: [], color: '#60a5fa' },
-    { id: 'n5', from: bh(0, 15), to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    { id: 'n6', from: bh(1, 13), to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-
-    // === AVR power ===
-    { id: 'n7', from: { componentId: 'avr1', pinId: 'vcc' }, to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    { id: 'n8', from: { componentId: 'avr1', pinId: 'gnd' }, to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-    { id: 'n9', from: { componentId: 'avr1', pinId: 'avcc' }, to: bh(9, 15), waypoints: [], color: '#ef4444' },
-    { id: 'n10', from: { componentId: 'avr1', pinId: 'agnd' }, to: bh(9, 13), waypoints: [], color: '#60a5fa' },
-    { id: 'n11', from: { componentId: 'avr1', pinId: 'pc6' }, to: { componentId: 'avr1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-
-    // Rail jumpers between groups
-    ...railJumpers(0, 1, 2, 3, 'n0'),
+    ...avrPowerWires('n'),
 
     // === ATmega328P → Matrix Columns (Anodes) ===
     // PC0..PC4 (A0..A4) → C5..C1 (reversed).
@@ -929,29 +685,25 @@ export function createNecklaceDemoCircuit(): { components: PlacedComponent[]; wi
     // the original hardware un-flipped this by wiring ROW_PINS[0] to the
     // rightmost physical column of the matrix. We mirror that wiring so
     // the default text-scroll mode reads left-to-right.
-    { id: 'n20', from: { componentId: 'avr1', pinId: 'pc0' }, to: { componentId: 'matrix1', pinId: 'c5' }, waypoints: [], color: '#22c55e' },
-    { id: 'n21', from: { componentId: 'avr1', pinId: 'pc1' }, to: { componentId: 'matrix1', pinId: 'c4' }, waypoints: [], color: '#22c55e' },
-    { id: 'n22', from: { componentId: 'avr1', pinId: 'pc2' }, to: { componentId: 'matrix1', pinId: 'c3' }, waypoints: [], color: '#22c55e' },
-    { id: 'n23', from: { componentId: 'avr1', pinId: 'pc3' }, to: { componentId: 'matrix1', pinId: 'c2' }, waypoints: [], color: '#22c55e' },
-    { id: 'n24', from: { componentId: 'avr1', pinId: 'pc4' }, to: { componentId: 'matrix1', pinId: 'c1' }, waypoints: [], color: '#22c55e' },
+    w('n20', cp('avr1', 'pc0'), cp('matrix1', 'c5'), LIME),
+    w('n21', cp('avr1', 'pc1'), cp('matrix1', 'c4'), LIME),
+    w('n22', cp('avr1', 'pc2'), cp('matrix1', 'c3'), LIME),
+    w('n23', cp('avr1', 'pc3'), cp('matrix1', 'c2'), LIME),
+    w('n24', cp('avr1', 'pc4'), cp('matrix1', 'c1'), LIME),
 
     // === ATmega328P → Matrix Rows (Cathodes) ===
     // PD2..PD7 → R1..R6, PB0 (D8) → R7
-    { id: 'n30', from: { componentId: 'avr1', pinId: 'pd2' }, to: { componentId: 'matrix1', pinId: 'r1' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'n31', from: { componentId: 'avr1', pinId: 'pd3' }, to: { componentId: 'matrix1', pinId: 'r2' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'n32', from: { componentId: 'avr1', pinId: 'pd4' }, to: { componentId: 'matrix1', pinId: 'r3' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'n33', from: { componentId: 'avr1', pinId: 'pd5' }, to: { componentId: 'matrix1', pinId: 'r4' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'n34', from: { componentId: 'avr1', pinId: 'pd6' }, to: { componentId: 'matrix1', pinId: 'r5' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'n35', from: { componentId: 'avr1', pinId: 'pd7' }, to: { componentId: 'matrix1', pinId: 'r6' }, waypoints: [], color: '#8b5cf6' },
-    { id: 'n36', from: { componentId: 'avr1', pinId: 'pb0' }, to: { componentId: 'matrix1', pinId: 'r7' }, waypoints: [], color: '#8b5cf6' },
-
-    // === Matrix Power ===
-    { id: 'n40', from: bh(0, 15), to: { componentId: 'matrix1', pinId: 'vcc' }, waypoints: [], color: '#ef4444' },
-    { id: 'n41', from: bh(1, 15), to: { componentId: 'matrix1', pinId: 'gnd' }, waypoints: [], color: '#60a5fa' },
+    w('n30', cp('avr1', 'pd2'), cp('matrix1', 'r1'), PURPLE),
+    w('n31', cp('avr1', 'pd3'), cp('matrix1', 'r2'), PURPLE),
+    w('n32', cp('avr1', 'pd4'), cp('matrix1', 'r3'), PURPLE),
+    w('n33', cp('avr1', 'pd5'), cp('matrix1', 'r4'), PURPLE),
+    w('n34', cp('avr1', 'pd6'), cp('matrix1', 'r5'), PURPLE),
+    w('n35', cp('avr1', 'pd7'), cp('matrix1', 'r6'), PURPLE),
+    w('n36', cp('avr1', 'pb0'), cp('matrix1', 'r7'), PURPLE),
 
     // === Next-mode pushbutton: PB1 (D9) ↔ GND ===
-    { id: 'n50', from: { componentId: 'btn1', pinId: 'a' }, to: { componentId: 'avr1', pinId: 'pb1' }, waypoints: [], color: '#fbbf24' },
-    { id: 'n51', from: { componentId: 'btn1', pinId: 'b' }, to: bh(1, 13), waypoints: [], color: '#60a5fa' },
+    w('n50', cp('btn1', 'a'), cp('avr1', 'pb1'), YELLOW),
+    w('n51', cp('btn1', 'b'), cp('avr1', 'gnd'), BLUE),
   ];
 
   return { components, wires };

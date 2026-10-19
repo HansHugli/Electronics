@@ -9,6 +9,7 @@ export interface Pin {
   side: 'left' | 'right' | 'top' | 'bottom';
   offset: number; // position along the side (0-1)
   type: 'power' | 'ground' | 'input' | 'output' | 'bidirectional';
+  number?: number; // physical pin number (DIP packages count counter-clockwise from pin 1)
 }
 
 export interface ComponentDefinition {
@@ -23,6 +24,36 @@ export interface ComponentDefinition {
   pins: Pin[];
   color: string;
   properties?: Record<string, { label: string; default: number | string; unit?: string }>;
+  /** Simulation model for custom chips (e.g. 'logic_and'); built-in parts use their type. */
+  behavior?: string;
+}
+
+/** Diagnostic codes the engine sets on `comp.state.warning`. */
+export type WarningCode =
+  | 'led_reversed'
+  | 'led_overcurrent'
+  | 'short_circuit'
+  | 'floating_input'
+  | 'unpowered'
+  | 'overcurrent'
+  | 'no_ground';
+
+/** One plain-language problem the engine found with a component. */
+export interface ComponentWarning {
+  code: WarningCode;
+  message: string;
+}
+
+/**
+ * Runtime state written by the simulator. Values are numbers or strings (gate
+ * outputs are stored as booleans at runtime). `warning` is set when the engine
+ * finds a problem with the part and is absent otherwise.
+ */
+export interface ComponentState {
+  /** Model-specific values (numbers or strings; gate outputs are booleans). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [key: string]: any;
+  warning?: ComponentWarning;
 }
 
 export interface PlacedComponent {
@@ -31,7 +62,7 @@ export interface PlacedComponent {
   position: Point;       // grid position on breadboard
   rotation: number;      // degrees (0, 90, 180, 270)
   properties: Record<string, number | string>;
-  state: Record<string, number | string>; // runtime state (e.g. LED on/off, voltage)
+  state: ComponentState; // runtime state (e.g. LED on/off, voltage)
 }
 
 /**
