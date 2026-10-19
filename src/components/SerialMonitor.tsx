@@ -48,7 +48,7 @@ export default function SerialMonitor({ components, visible, onToggle, simRunnin
       <div className="serial-header">
         <span className="scope-title">Serial Monitor</span>
         {!simRunning && <span className="serial-hint">Simulation paused</span>}
-        <button type="button" className="scope-close-btn" onClick={onToggle}>x</button>
+        <button type="button" className="scope-close-btn" onClick={onToggle} aria-label="Close the serial monitor" title="Close the serial monitor">×</button>
       </div>
       <pre ref={outputRef} className="serial-output">
         {serialOutputs.length === 0 ? (

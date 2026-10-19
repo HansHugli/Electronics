@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import Modal from './Modal';
 
 const QUOTES = [
   { text: "The scientists of today think deeply instead of clearly. One must be sane to think clearly, but one can think deeply and be quite insane.", author: "Nikola Tesla" },
@@ -41,14 +42,13 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
   }, []);
 
   return (
-    <div className="modal-overlay">
-      <div className="modal about-modal">
+    <Modal className="about-modal" onClose={onClose} labelledBy="about-title">
         <div className="about-icon">
           <img src="./icon.png" alt="E101" width={64} height={64} onError={(e) => {
             (e.target as HTMLImageElement).style.display = 'none';
           }} />
         </div>
-        <h2 className="about-title">E101 Electronics Simulator</h2>
+        <h2 id="about-title" className="about-title">E101 Electronics Simulator</h2>
         <span className="about-version">v{version}</span>
         <div className="about-quote">
           <p className="about-quote-text">&ldquo;{quote.text}&rdquo;</p>
@@ -58,7 +58,6 @@ export default function AboutDialog({ onClose }: AboutDialogProps) {
           <span className="about-tech">React + TypeScript + Electron</span>
           <button type="button" className="modal-btn" onClick={onClose}>Close</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
