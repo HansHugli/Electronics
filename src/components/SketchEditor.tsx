@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import Modal from './Modal';
 
-const DEFAULT_SKETCH = `// Blink LED on pin 13
+export const DEFAULT_SKETCH = `// Blink LED on pin 13
 void setup() {
   pinMode(13, OUTPUT);
 }
@@ -14,8 +15,12 @@ void loop() {
 `;
 
 interface SketchEditorProps {
-  onCompiled: (hex: string) => void;
-  onClose: () => void;
+  /** The part's saved sketch (properties.sketch); Blink when empty. */
+  initialSketch?: string;
+  /** A compile succeeded: store the hex and the sketch on the part. The editor stays open. */
+  onCompiled: (hex: string, sketch: string) => void;
+  /** Closed; `sketch` is the editor's text, so edits aren't lost. */
+  onClose: (sketch: string) => void;
 }
 
 /** Parse arduino-cli compile errors into structured format. */
@@ -35,8 +40,8 @@ function parseCompileErrors(raw: string): { line: number; col: number; level: st
   return errors;
 }
 
-export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps) {
-  const [code, setCode] = useState(DEFAULT_SKETCH);
+export default function SketchEditor({ initialSketch, onCompiled, onClose }: SketchEditorProps) {
+  const [code, setCode] = useState(initialSketch && initialSketch.trim() ? initialSketch : DEFAULT_SKETCH);
   const [status, setStatus] = useState<'idle' | 'setting-up' | 'compiling' | 'done' | 'error'>('idle');
   const [message, setMessage] = useState('');
   const [compileErrors, setCompileErrors] = useState<{ line: number; col: number; level: string; text: string }[]>([]);
@@ -132,7 +137,7 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
           }
         }
         setMessage(msg);
-        onCompiled(result.hex);
+        onCompiled(result.hex, code);
       } else {
         setStatus('error');
         const errText = result.error || 'Compilation failed';
@@ -193,9 +198,7 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
   const lineCount = code.split('\n').length;
 
   return (
-    <div className="modal-overlay">
-      <div className="modal sketch-modal">
-        <h2 className="modal-title">Arduino Sketch Editor</h2>
+    <Modal title="Arduino Sketch Editor" className="sketch-modal" onClose={() => onClose(code)}>
         <div className="sketch-editor-wrap">
           {/* Line numbers */}
           <div ref={lineNumbersRef} className="sketch-line-numbers">
@@ -215,6 +218,8 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
             onChange={(e) => { setCode(e.target.value); setCompileErrors([]); setSketchFilePath(null); }}
             onScroll={handleTextareaScroll}
             spellCheck={false}
+            wrap="off"
+            aria-label="Sketch source"
             placeholder="Write your Arduino sketch here..."
           />
         </div>
@@ -279,11 +284,10 @@ export default function SketchEditor({ onCompiled, onClose }: SketchEditorProps)
               </button>
             </>
           )}
-          <button type="button" className="modal-btn" onClick={onClose}>
-            Cancel
+          <button type="button" className="modal-btn" onClick={() => onClose(code)}>
+            Close
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

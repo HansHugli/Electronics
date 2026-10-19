@@ -35,7 +35,9 @@ textarea {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  /* Never squeezed below this by the side panels, so the toolbar stays usable. */
+  min-width: 440px;
+  position: relative;
 }
 
 /* ---- Sidebar ---- */
@@ -77,7 +79,7 @@ textarea {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #64748b;
+  color: #94a3b8;
   padding: 0.25rem 0.5rem;
   font-weight: 600;
 }
@@ -125,15 +127,15 @@ textarea {
 }
 
 .component-card-detail {
-  font-size: 0.6rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: #94a3b8;
   line-height: 1.3;
 }
 
 .component-card-delete {
   background: none;
   border: none;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 1rem;
   cursor: pointer;
   padding: 0 0.3rem;
@@ -151,18 +153,92 @@ textarea {
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  padding: 0.4rem 0.75rem;
+  padding: 0.35rem 0.6rem;
   background: #0f172a;
   border-bottom: 1px solid #1e293b;
-  gap: 0.5rem;
+  gap: 0.35rem 0.6rem;
   flex-shrink: 0;
+  /* Above the board, below dropdowns and modals. */
+  position: relative;
+  z-index: 20;
 }
 
+/* Groups wrap to a second row instead of running under the side panel. */
 .toolbar-group {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.25rem;
+}
+
+.toolbar-title {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.toolbar-dirty {
+  color: #fbbf24;
+  font-size: 0.7rem;
+}
+
+.toolbar-clock {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+  padding: 0 0.3rem;
+  min-width: 6.5em;
+  white-space: nowrap;
+}
+
+.toolbar-lag {
+  font-size: 0.75rem;
+  color: #fbbf24;
+  white-space: nowrap;
+}
+
+.toolbar-caret {
+  font-size: 0.7rem;
+  margin-left: 0.1rem;
+}
+
+.toolbar-menu {
+  position: relative;
+}
+
+.toolbar-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 0.4rem;
+  padding: 0.25rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+}
+
+.toolbar-menu-item {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border: none;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.toolbar-menu-item:hover,
+.toolbar-menu-item:focus-visible {
+  background: #334155;
 }
 
 .toolbar-btn {
@@ -219,7 +295,6 @@ textarea {
   color: #94a3b8;
   font-size: 0.75rem;
   cursor: pointer;
-  outline: none;
 }
 
 .toolbar-speed-select:hover {
@@ -239,7 +314,7 @@ textarea {
 
 .toolbar-status {
   font-size: 0.7rem;
-  color: #64748b;
+  color: #94a3b8;
   padding: 0 0.5rem;
   white-space: nowrap;
   overflow: hidden;
@@ -259,10 +334,11 @@ textarea {
   flex: 1;
   position: relative;
   background: #0b1120;
-  overflow: auto;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 0;
 }
 
 .breadboard-svg {
@@ -321,10 +397,16 @@ textarea {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.75rem;
-  color: #64748b;
+  gap: 0.4rem;
+  color: #cbd5e1;
   font-size: 0.9rem;
   pointer-events: none;
+  background: rgba(15, 23, 42, 0.88);
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1.1rem;
+  text-align: center;
+  max-width: 80%;
 }
 
 .demo-btn {
@@ -351,7 +433,8 @@ textarea {
   flex-direction: column;
   background: #0f172a;
   border-left: 1px solid #1e293b;
-  flex-shrink: 0;
+  /* Gives way (down to 240 px) before the board and toolbar do. */
+  flex-shrink: 1;
   position: relative;
   min-width: 240px;
   max-width: 720px;
@@ -431,7 +514,7 @@ textarea {
 }
 
 .chat-empty {
-  color: #475569;
+  color: #94a3b8;
   font-size: 0.75rem;
   text-align: center;
   padding: 1.5rem 0.5rem;
@@ -453,11 +536,11 @@ textarea {
 }
 
 .chat-msg-role {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #64748b;
+  color: #94a3b8;
 }
 
 .chat-msg-user .chat-msg-role {
@@ -633,7 +716,6 @@ textarea {
 }
 
 .chat-input:focus {
-  outline: none;
   border-color: #38bdf8;
 }
 
@@ -680,7 +762,6 @@ textarea {
 }
 
 .chat-option-select:focus {
-  outline: none;
   border-color: #38bdf8;
 }
 
@@ -701,7 +782,7 @@ textarea {
 }
 
 .chat-auto-badge {
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: #38bdf8;
   background: #1e3a5f;
   border-radius: 0.25rem;
@@ -715,7 +796,7 @@ textarea {
 }
 
 .properties-panel.empty p {
-  color: #475569;
+  color: #94a3b8;
   font-size: 0.75rem;
 }
 
@@ -745,7 +826,7 @@ textarea {
 }
 
 .property-input-group input {
-  width: 80px;
+  width: 96px;
   padding: 0.2rem 0.4rem;
   border: 1px solid #334155;
   border-radius: 0.3rem;
@@ -756,12 +837,11 @@ textarea {
 }
 
 .property-input-group input:focus {
-  outline: none;
   border-color: #38bdf8;
 }
 
 .property-unit {
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.75rem;
   min-width: 1.5rem;
 }
@@ -846,7 +926,6 @@ textarea {
   appearance: none;
   background: #334155;
   border-radius: 2px;
-  outline: none;
   cursor: pointer;
 }
 
@@ -860,7 +939,7 @@ textarea {
 }
 
 .property-value {
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.75rem;
 }
 
@@ -965,7 +1044,7 @@ textarea {
   padding: 0.15rem 0.4rem;
   border: 1px solid;
   border-radius: 0.3rem;
-  font-size: 0.65rem;
+  font-size: 0.7rem;
   color: #e2e8f0;
   white-space: nowrap;
 }
@@ -980,8 +1059,8 @@ textarea {
 .scope-trace-remove {
   background: none;
   border: none;
-  color: #64748b;
-  font-size: 0.65rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
   cursor: pointer;
   padding: 0 0.15rem;
   line-height: 1;
@@ -992,15 +1071,15 @@ textarea {
 }
 
 .scope-hint {
-  color: #475569;
-  font-size: 0.65rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
 }
 
 .scope-close-btn {
   background: none;
   border: 1px solid #334155;
   border-radius: 0.3rem;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.7rem;
   cursor: pointer;
   padding: 0.1rem 0.35rem;
@@ -1020,8 +1099,8 @@ textarea {
 
 .scope-paused {
   text-align: center;
-  color: #475569;
-  font-size: 0.65rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
   padding: 0.25rem;
 }
 
@@ -1055,8 +1134,8 @@ textarea {
 }
 
 .serial-hint {
-  color: #475569;
-  font-size: 0.65rem;
+  color: #94a3b8;
+  font-size: 0.7rem;
 }
 
 .serial-output {
@@ -1077,7 +1156,7 @@ textarea {
 }
 
 .serial-empty {
-  color: #475569;
+  color: #94a3b8;
   font-style: italic;
 }
 
@@ -1174,7 +1253,7 @@ textarea {
 
 .sketch-line-numbers {
   background: #0c1222;
-  color: #475569;
+  color: #94a3b8;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 0.8rem;
   line-height: 1.5;
@@ -1185,11 +1264,13 @@ textarea {
   min-width: 2.5rem;
   border-right: 1px solid #1e293b;
   overflow: hidden;
+  /* Room for the textarea's horizontal scrollbar, so the last lines line up. */
+  padding-bottom: calc(0.75rem + 16px);
 }
 
 .sketch-line-num {
-  height: 1.2em;
-  line-height: 1.2em;
+  height: 1.5em;
+  line-height: 1.5;
 }
 
 .sketch-line-num.error {
@@ -1209,7 +1290,6 @@ textarea {
   line-height: 1.5;
   padding: 0.75rem;
   resize: none;
-  outline: none;
   tab-size: 2;
   overflow-y: auto;
 }
@@ -1264,7 +1344,7 @@ textarea {
 .sketch-error-item.note { color: #93c5fd; }
 
 .sketch-error-loc {
-  color: #64748b;
+  color: #94a3b8;
   white-space: nowrap;
   min-width: 5rem;
 }
@@ -1311,13 +1391,12 @@ textarea {
 }
 
 .modal-field input:focus {
-  outline: none;
   border-color: #38bdf8;
 }
 
 .modal-hint {
   font-size: 0.7rem;
-  color: #64748b;
+  color: #94a3b8;
   margin-bottom: 1rem;
   word-break: break-all;
 }
@@ -1327,7 +1406,7 @@ textarea {
 }
 
 .modal-empty {
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.85rem;
   text-align: center;
   padding: 2rem 0;
@@ -1400,7 +1479,7 @@ textarea {
 }
 
 .modal-unit {
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.85rem;
   min-width: 1.5rem;
 }
@@ -1479,8 +1558,8 @@ textarea {
 }
 
 .file-meta {
-  font-size: 0.65rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: #94a3b8;
 }
 
 .file-actions {
@@ -1515,7 +1594,7 @@ textarea {
 
 .about-version {
   font-size: 0.8rem;
-  color: #64748b;
+  color: #94a3b8;
   margin-bottom: 1rem;
 }
 
@@ -1538,7 +1617,7 @@ textarea {
 
 .about-quote-author {
   font-size: 0.7rem;
-  color: #64748b;
+  color: #94a3b8;
   text-align: right;
 }
 
@@ -1550,8 +1629,8 @@ textarea {
 }
 
 .about-tech {
-  font-size: 0.65rem;
-  color: #475569;
+  font-size: 0.7rem;
+  color: #94a3b8;
 }
 
 /* ---- Settings Dialog ---- */
@@ -1581,8 +1660,8 @@ textarea {
 }
 
 .settings-hint {
-  font-size: 0.65rem;
-  color: #475569;
+  font-size: 0.7rem;
+  color: #94a3b8;
   margin-top: 0.3rem;
 }
 
@@ -1620,8 +1699,8 @@ textarea {
 }
 
 .usage-stat-label {
-  font-size: 0.6rem;
-  color: #64748b;
+  font-size: 0.7rem;
+  color: #94a3b8;
   margin-top: 0.15rem;
 }
 
@@ -1723,7 +1802,7 @@ textarea {
   border: 1px solid #334155;
   border-radius: 0.3rem;
   background: transparent;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.7rem;
   cursor: pointer;
   transition: all 0.15s;
@@ -1780,7 +1859,354 @@ textarea {
 }
 
 .context-menu-shortcut {
-  color: #64748b;
+  color: #94a3b8;
   font-size: 0.7rem;
   margin-left: 16px;
+}
+
+/* ---- Focus (keyboard users can always see where they are) ---- */
+
+:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 0;
+}
+
+.sketch-textarea:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ---- Modals ---- */
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.modal-header .modal-title {
+  margin-bottom: 1rem;
+}
+
+.modal,
+.modal * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.modal button {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.confirm-modal {
+  width: 440px;
+  max-width: calc(100vw - 2rem);
+}
+
+.confirm-message {
+  color: #cbd5e1;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- Toasts ---- */
+
+.toast-list {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 200;
+  max-width: min(420px, calc(100vw - 2rem));
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 0.5rem;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.toast-error {
+  background: #3b0d0d;
+  border-color: #ef4444;
+  color: #fecaca;
+}
+
+.toast-message {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.2rem;
+}
+
+/* ---- Crash screen (ErrorBoundary) ---- */
+
+.crash-screen {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0f172a;
+  padding: 2rem;
+}
+
+.crash-box {
+  max-width: 560px;
+  background: #1e293b;
+  border: 1px solid #ef4444;
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  color: #e2e8f0;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.crash-box h1 {
+  font-size: 1.1rem;
+  margin-bottom: 0.75rem;
+}
+
+.crash-box p {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #cbd5e1;
+}
+
+.crash-detail {
+  margin: 0.75rem 0 0.5rem;
+  padding: 0.6rem;
+  background: #0f172a;
+  border-radius: 0.4rem;
+  color: #fca5a5;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- Data folder notice ---- */
+
+.data-notice {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem;
+  background: #422006;
+  border-bottom: 1px solid #f59e0b;
+  color: #fde68a;
+  font-size: 0.8rem;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.data-notice span {
+  flex: 1;
+}
+
+.data-notice-close {
+  background: none;
+  border: none;
+  color: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+/* ---- Zoom controls on the board ---- */
+
+.zoom-controls {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid #334155;
+  border-radius: 0.4rem;
+  padding: 2px;
+  z-index: 5;
+}
+
+.zoom-controls button {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 0.4rem;
+  border: none;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.zoom-controls button:hover {
+  background: #334155;
+}
+
+.zoom-level {
+  min-width: 3.2em;
+  text-align: center;
+  font-size: 0.75rem;
+  color: #cbd5e1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- "Why isn't it working?" ---- */
+
+.problems-panel {
+  position: absolute;
+  left: 0.6rem;
+  top: 0.6rem;
+  max-width: min(360px, 60%);
+  background: rgba(30, 41, 59, 0.96);
+  border: 1px solid #f59e0b;
+  border-radius: 0.5rem;
+  z-index: 6;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+.problems-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: none;
+  background: transparent;
+  color: #fde68a;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.problems-icon,
+.property-warning-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.2em;
+  height: 1.2em;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #0f172a;
+  font-weight: 800;
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}
+
+.problems-list {
+  list-style: none;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 0 0.3rem 0.3rem;
+}
+
+.problems-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  width: 100%;
+  padding: 0.35rem 0.4rem;
+  border: none;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #e2e8f0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.problems-item:hover {
+  background: #334155;
+}
+
+.problems-part {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.problems-message {
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+/* ---- Properties: value entry and warnings ---- */
+
+.property-row-wrap {
+  flex-wrap: wrap;
+}
+
+.property-row-wrap .property-hint,
+.property-row-wrap .property-error {
+  flex-basis: 100%;
+  text-align: right;
+  margin-top: 0.15rem;
+}
+
+.property-hint {
+  background: none;
+  padding: 0;
+}
+
+.property-error {
+  color: #fca5a5;
+  font-size: 0.75rem;
+}
+
+.property-input-group input.invalid,
+.modal-input-row input.invalid {
+  border-color: #ef4444;
+}
+
+.property-warning {
+  display: flex;
+  gap: 0.4rem;
+  align-items: flex-start;
+  padding: 0.45rem 0.55rem;
+  margin-bottom: 0.5rem;
+  background: #422006;
+  border: 1px solid #f59e0b;
+  border-radius: 0.4rem;
+  color: #fde68a;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.properties-id {
+  font-weight: 400;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.component-card:focus-visible {
+  outline-offset: -2px;
 }
