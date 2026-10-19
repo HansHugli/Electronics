@@ -1,6 +1,6 @@
 {
   "name": "e101-electronics",
-  "version": "0.1.16",
+  "version": "0.2.0",
   "private": true,
   "description": "Visual electronics circuit simulator built with React, TypeScript, and Electron",
   "main": "dist/electron/main.js",

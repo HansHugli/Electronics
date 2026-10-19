@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.2.0](https://github.com/HansHugli/Electronics/compare/v0.1.16...v0.2.0) (2026-10-19)
+
+
+### Features
+
+* **ai:** pricing, model choice, history, tool schemas and tool validation ([45ff40d](https://github.com/HansHugli/Electronics/commit/45ff40dd63224bbc6d4a8522da04228cafd72ceb))
+* **data:** direct Save to the current file, Save As, New, corrupt autosave copy ([98957f8](https://github.com/HansHugli/Electronics/commit/98957f889e130c0205e9ba487ee9df8a521c995a))
+* **engine:** sub-stepped nonlinear solver with settling logic and MCU replay ([9a11ca7](https://github.com/HansHugli/Electronics/commit/9a11ca7ea5163c4da09be1de3620111bf223fbd2))
+* **engine:** tie sim time to wall-clock time with useSimulationLoop ([901bd9e](https://github.com/HansHugli/Electronics/commit/901bd9e1dc62aa8d137b6ea89f22d22f7febe6d9))
+* **ui:** one modal stack with in-app dialogs and Escape ([e4740bc](https://github.com/HansHugli/Electronics/commit/e4740bcc7f65e9f5ad94acd0d82452e0211c349b))
+
+
+### Bug Fixes
+
+* **ai:** validate every tool call, one undo step per batch, Stop button ([16e61c1](https://github.com/HansHugli/Electronics/commit/16e61c1359b3ef77928ae98d4b724996fc8efa64))
+* connect the engine, UI and AI branches ([8cb0fef](https://github.com/HansHugli/Electronics/commit/8cb0fef01a19869aeeaff25da9d8b45bd814b214))
+* **data:** config store that never overwrites a damaged file, OneDrive detection ([4d40d3a](https://github.com/HansHugli/Electronics/commit/4d40d3a78d4e2280fa26dcf3b667d81fdd440e14))
+* **data:** real breadboard rails, real DIP pinouts, validated custom chips ([501c908](https://github.com/HansHugli/Electronics/commit/501c90847cbeba7663a167c0b3d8cc55ea451f19))
+* **data:** validate circuit files and track unsaved changes in history ([2b7e22d](https://github.com/HansHugli/Electronics/commit/2b7e22dfab74c38d13f39b98727b1bdc5bb192bc))
+* **engine:** rewire the demo circuits for real pinouts and full rails ([1ceb4ba](https://github.com/HansHugli/Electronics/commit/1ceb4ba706965f344b27b211539a8d0e811da870))
+* **engine:** validate HEX files, ADC in volts, clock speed, reset, serial in ([75caf1c](https://github.com/HansHugli/Electronics/commit/75caf1c95cf209f090d00847a4b4a05ec29fbf1d))
+* **format:** show small values, round at prefix boundaries, add parseSI ([cce432b](https://github.com/HansHugli/Electronics/commit/cce432b190544b9ab123176888b9280b67351fea))
+* **security:** lock down the window and IPC; safe data handling in main ([7dc2749](https://github.com/HansHugli/Electronics/commit/7dc2749e7fdb16537eb3d030be2d387c77922336))
+* **security:** verified arduino-cli download, path guards and a CSP ([a4ed7c4](https://github.com/HansHugli/Electronics/commit/a4ed7c4769ec4febec9b86dc5484eeb52f669bb1))
+* **ui:** an AI batch is one Undo step ([c70259d](https://github.com/HansHugli/Electronics/commit/c70259dd3bcd72478c6a745d942db076b6b9cc4e))
+* **ui:** exact mouse mapping, drags that always finish, fit and zoom ([13934cd](https://github.com/HansHugli/Electronics/commit/13934cd53338f512d461fa16fed610453b59fb97))
+* **ui:** reachable toolbar, safe loads, close guard and readable chrome ([9b9f067](https://github.com/HansHugli/Electronics/commit/9b9f06726bb2fbed572a460c600441cdefbd1b8a))
+* **ui:** SI value entry, warnings and flip polarity in the properties panel ([9763625](https://github.com/HansHugli/Electronics/commit/9763625fc82f88cc03c435d31d6ff11979502001))
+
+
+### Documentation
+
+* describe the reviewed app: rails, chips, clock, warnings, AI and data safety ([ae1d99c](https://github.com/HansHugli/Electronics/commit/ae1d99c95ce42828020127dd7d2b1703ce263330))
+* point Claude sessions at Synora for E101's rules and design notes ([eba12d4](https://github.com/HansHugli/Electronics/commit/eba12d400b63c3d088eb73f2e3903a13bb1b59ed))
+
+
+### Build System
+
+* add vitest for engine and logic tests ([7e77ea4](https://github.com/HansHugli/Electronics/commit/7e77ea4832d1c1680475f2d3fdb4f401a0340b76))
+
 ## [0.1.16](https://github.com/HansHugli/Electronics/compare/v0.1.15...v0.1.16) (2026-04-10)
 
 
