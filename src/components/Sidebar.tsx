@@ -8,6 +8,13 @@ interface SidebarProps {
   catalogVersion: number;
 }
 
+/**
+ * The parts that ship with the app, captured before any custom chip is
+ * registered. Only custom chips (from chips/ or made by the assistant) can be
+ * deleted.
+ */
+export const BUILT_IN_TYPES: ReadonlySet<string> = new Set(Object.keys(COMPONENT_DEFINITIONS));
+
 const DARK_COLORS = new Set(['#1a1a1a', '#2d2d2d', '#4a4a4a', '#1e293b']);
 
 function ComponentCard({
@@ -25,10 +32,20 @@ function ComponentCard({
   return (
     <div
       className="component-card"
-      title={def.description ? `${def.label} — ${def.description}\nClick to place on the breadboard.` : `${def.label}\nClick to place on the breadboard.`}
+      role="button"
+      tabIndex={0}
+      draggable
+      title={`${def.label}${def.description ? ` — ${def.description}` : ''}\nClick to place it on the breadboard, or drag it to a spot.`}
       onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); }
+      }}
+      onDragStart={(e) => {
+        e.dataTransfer.setData('componentType', def.type);
+        e.dataTransfer.effectAllowed = 'copy';
+      }}
     >
-      <div className="component-card-icon" style={{
+      <div className="component-card-icon" aria-hidden="true" style={{
         backgroundColor: def.color + '22',
         borderColor: isDark ? '#64748b' : def.color,
       }}>
@@ -42,11 +59,13 @@ function ComponentCard({
         <button
           type="button"
           className="component-card-delete"
-          title={`Delete "${def.label}" component type`}
+          title={`Delete the custom part "${def.label}"`}
+          aria-label={`Delete the custom part ${def.label}`}
           onClick={(e) => {
             e.stopPropagation();
             onDelete();
           }}
+          onKeyDown={(e) => e.stopPropagation()}
         >
           ×
         </button>
@@ -61,7 +80,7 @@ export default function Sidebar({ onClick, onDeleteType, catalogVersion }: Sideb
   const definitions = Object.values(COMPONENT_DEFINITIONS);
 
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" aria-label="Components">
       <div className="sidebar-header">
         <h2>Components</h2>
       </div>
@@ -77,7 +96,7 @@ export default function Sidebar({ onClick, onDeleteType, catalogVersion }: Sideb
                   key={def.type}
                   def={def}
                   onClick={() => onClick(def.type)}
-                  onDelete={onDeleteType ? () => onDeleteType(def.type) : undefined}
+                  onDelete={onDeleteType && !BUILT_IN_TYPES.has(def.type) ? () => onDeleteType(def.type) : undefined}
                 />
               ))}
             </div>
