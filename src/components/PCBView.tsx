@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import Modal from './Modal';
 import { PlacedComponent, Wire } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
 import { formatValue } from '../utils/format';
@@ -467,12 +468,12 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
   }, [components, wires]);
 
   return (
-    <div className="modal-overlay">
-      <div className="modal pcb-modal">
-        <div className="pcb-header">
-          <h2 className="modal-title">PCB Layout Preview</h2>
-          <button type="button" className="scope-close-btn" onClick={onClose}>x</button>
-        </div>
+    <Modal
+      title="PCB Layout Preview"
+      className="pcb-modal"
+      onClose={onClose}
+      headerExtra={<button type="button" className="scope-close-btn" onClick={onClose} aria-label="Close PCB preview">×</button>}
+    >
         <div className="pcb-canvas-wrap">
           <svg className="pcb-canvas" viewBox={`0 0 ${boardW} ${boardH}`} preserveAspectRatio="xMidYMid meet">
             {/* Board background */}
@@ -614,7 +615,6 @@ export default function PCBView({ components, wires, onClose }: PCBViewProps) {
         <div className="modal-actions">
           <button type="button" className="modal-btn" onClick={onClose}>Close</button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

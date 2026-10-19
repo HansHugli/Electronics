@@ -119,12 +119,12 @@ export default function Oscilloscope({
             <span key={tr.componentId} className="scope-trace-tag" style={{ borderColor: tr.color }}>
               <span className="scope-trace-dot" style={{ background: tr.color }} />
               {tr.label}
-              <button type="button" className="scope-trace-remove" onClick={() => onRemoveProbe(tr.componentId)}>x</button>
+              <button type="button" className="scope-trace-remove" onClick={() => onRemoveProbe(tr.componentId)} aria-label={`Stop probing ${tr.componentId}`}>×</button>
             </span>
           ))}
           {traces.length === 0 && <span className="scope-hint">Select a component and click "Probe" to add a trace</span>}
         </div>
-        <button type="button" className="scope-close-btn" onClick={onToggle}>x</button>
+        <button type="button" className="scope-close-btn" onClick={onToggle} aria-label="Close the oscilloscope" title="Close the oscilloscope">×</button>
       </div>
       <svg className="scope-chart" viewBox={`0 0 ${CHART_W} ${CHART_H}`} preserveAspectRatio="none">
         {/* Plot background */}

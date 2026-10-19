@@ -5,9 +5,13 @@ import { GRID_W, GRID_H, BOARD_X_OFFSET } from './data/breadboard';
 import { createBlinkDemoCircuit, createCounterDemoCircuit, createAVRBlinkDemoCircuit, createMatrixDemoCircuit, createNecklaceDemoCircuit, AVR_BLINK_HEX, AVR_MATRIX_HEX, AVR_NECKLACE_HEX } from './engine/simulation';
 import { CircuitSimulator } from './engine/CircuitSimulator';
 import { useHistory } from './hooks/useHistory';
+import {
+  parseCircuitText, serializeCircuit, serializeAutosave, maxIdNumber, errorMessage,
+  AutosaveData,
+} from './hooks/circuitFile';
 import { loadExternalChips, chipJSONToDefinition } from './data/chipLoader';
 import type { ChipDefinitionJSON } from './data/chipLoader';
-import Sidebar from './components/Sidebar';
+import Sidebar, { BUILT_IN_TYPES } from './components/Sidebar';
 import Toolbar from './components/Toolbar';
 import Breadboard from './components/Breadboard';
 import PropertiesPanel from './components/PropertiesPanel';
@@ -21,6 +25,10 @@ import SerialMonitor from './components/SerialMonitor';
 import PCBView from './components/PCBView';
 import ContextMenu from './components/ContextMenu';
 import UsagePanel from './components/UsagePanel';
+import { ModalLayer, ConfirmDialog, ConfirmButton } from './components/Modal';
+import ToastList, { useToasts } from './components/Toast';
+import ProblemsPanel from './components/ProblemsPanel';
+import { shortcutsBlocked } from './components/modalStack';
 import { generateKiCadNetlist, generateBOM } from './engine/pcbExport';
 
 let nextId = 1;
@@ -34,6 +42,29 @@ function genWireId() {
 
 const WIRE_COLORS = ['#ef4444', '#fbbf24', '#4ade80', '#60a5fa', '#c084fc', '#f472b6'];
 let wireColorIdx = 0;
+
+/**
+ * Preload API of the shell branch (shared contract), declared locally and
+ * optional so this branch works with or without it.
+ */
+type ShellApi = ElectronApi & {
+  onCloseRequest?: (cb: () => void) => () => void;
+  confirmClose?: () => void;
+  getDataStatus?: () => Promise<{ dataDir: string; ok: boolean; problem?: string }>;
+  /** Always ask for a file name (Save As). Without it, saveCircuit asks. */
+  saveCircuitAs?: (data: string, defaultPath?: string) => Promise<{ filePath: string; name: string } | null>;
+};
+function shellApi(): ShellApi | undefined {
+  return window.electronApi as ShellApi | undefined;
+}
+
+const isKnownType = (type: string) => !!COMPONENT_DEFINITIONS[type];
+
+/** Load firmware into the current simulator, if this engine version still takes it directly. */
+function loadFirmware(sim: CircuitSimulator, componentId: string, hex: string) {
+  const s = sim as unknown as { loadAVRProgram?: (id: string, hex: string) => void };
+  s.loadAVRProgram?.(componentId, hex);
+}
 
 /** Check if two component rectangles overlap (with small tolerance). */
 function componentsOverlap(
@@ -58,7 +89,14 @@ function componentsOverlap(
   );
 }
 
-function App() {
+interface ConfirmState {
+  title: string;
+  message: string;
+  buttons: ConfirmButton[];
+  onCancel: () => void;
+}
+
+function App({ skipRestore = false }: { skipRestore?: boolean }) {
   const [components, setComponents] = useState<PlacedComponent[]>([]);
   const [wires, setWires] = useState<Wire[]>([]);
   const [simRunning, setSimRunning] = useState(false);
@@ -66,7 +104,6 @@ function App() {
   const [wiringFrom, setWiringFrom] = useState<{ componentId: string; pinId: string } | null>(null);
   const [selectedComponentIds, setSelectedComponentIds] = useState<string[]>([]);
   const [selectedWireId, setSelectedWireId] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [circuitName, setCircuitName] = useState('untitled');
   const [currentFilePath, setCurrentFilePath] = useState<string | undefined>(undefined);
   const [pendingPowerDrop, setPendingPowerDrop] = useState<Point | null>(null);
@@ -76,73 +113,156 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const sidebarResizeStart = useRef<{ x: number; width: number } | null>(null);
   const [sidebarResizing, setSidebarResizing] = useState(false);
-  const [showSketchEditor, setShowSketchEditor] = useState(false);
-  const sketchTargetId = useRef<string | null>(null);
+  /** The ATmega whose sketch is open in the editor (null = editor closed). */
+  const [sketchTargetId, setSketchTargetId] = useState<string | null>(null);
   const [serialVisible, setSerialVisible] = useState(false);
   const [showPCBView, setShowPCBView] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; componentId?: string; wireId?: string } | null>(null);
-  const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [dataProblem, setDataProblem] = useState<string | null>(null);
+  /** Bumped to make the board zoom to fit (after a load). */
+  const [fitRequest, setFitRequest] = useState(0);
+  /** False until the autosave restore has finished or failed: autosave must not run before (D2). */
+  const [restoreDone, setRestoreDone] = useState(false);
   const simulator = useRef(new CircuitSimulator());
   const history = useHistory();
+  const toasts = useToasts();
+  const showToast = toasts.show;
   const clipboard = useRef<PlacedComponent | null>(null);
-  const dragStartPos = useRef<Point | null>(null);
   const [simSpeed, setSimSpeed] = useState(1); // multiplier: 0.25, 0.5, 1, 2, 5, 10
   const [simAccuracy, setSimAccuracy] = useState(1); // sub-steps per tick: 1, 2, 5, 10
-  const [chipsLoaded, setChipsLoaded] = useState(false);
+  const [, setChipsLoaded] = useState(false);
   const [catalogVersion, setCatalogVersion] = useState(0);
   const [scopeVisible, setScopeVisible] = useState(false);
   const scope = useOscilloscope();
 
-  // Load external chip definitions on mount, then restore autosaved circuit
-  useEffect(() => {
-    loadExternalChips().then(async (count) => {
-      if (count > 0) console.log(`Loaded ${count} external chip definition(s)`);
-      setChipsLoaded(true);
+  const dirty = history.isDirty();
+  const circuitNameRef = useRef(circuitName);
+  circuitNameRef.current = circuitName;
+  const currentFilePathRef = useRef(currentFilePath);
+  currentFilePathRef.current = currentFilePath;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
 
-      // Restore autosaved circuit if available
-      if (window.electronApi?.loadAutosave) {
+  /**
+   * Put a circuit from disk on the board. `fresh` starts a new undo history
+   * (file open, autosave restore); otherwise the load is one undoable step
+   * (examples), so the previous circuit can be brought back with Undo.
+   */
+  const applyCircuit = useCallback((
+    data: AutosaveData,
+    opts: { name?: string; filePath?: string; fresh: boolean; dirty?: boolean },
+  ) => {
+    setSimRunning(false);
+    setSimTime(0);
+    simulator.current.reset();
+    setComponents(data.components);
+    setWires(data.wires);
+    setSelectedComponentIds([]);
+    setSelectedWireId(null);
+    setWiringFrom(null);
+    setCircuitName(opts.name ?? 'untitled');
+    setCurrentFilePath(opts.filePath);
+    // Never hand out an id that's already used, including by circuits that
+    // Undo can bring back.
+    nextId = Math.max(nextId, maxIdNumber(data.components) + 1);
+    nextWireId = Math.max(nextWireId, maxIdNumber(data.wires) + 1);
+    if (opts.fresh) history.reset(data.components, data.wires);
+    else history.push(data.components, data.wires);
+    if (opts.dirty) history.markUnsaved(); else history.markSaved();
+    // Firmware travels in properties.hex; hand it to the simulator too.
+    for (const c of data.components) {
+      if (c.type === 'atmega328' && typeof c.properties.hex === 'string' && c.properties.hex) {
+        try { loadFirmware(simulator.current, c.id, c.properties.hex); } catch { /* reported on Run */ }
+      }
+    }
+    setFitRequest((n) => n + 1);
+  }, [history]);
+
+  // Load external chip definitions on mount, then restore the autosaved circuit.
+  // Autosave stays off until this has finished or failed (D2), and the
+  // restored circuit becomes the start of the undo history (D1).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const count = await loadExternalChips();
+        if (count > 0) console.log(`Loaded ${count} external chip definition(s)`);
+      } catch (err) {
+        if (!cancelled) showToast(`Custom chips couldn't be loaded: ${errorMessage(err)}`, 'error');
+      }
+      if (cancelled) return;
+      setChipsLoaded(true);
+      setCatalogVersion((v) => v + 1);
+
+      let restored = false;
+      const api = shellApi();
+      if (!skipRestore && api?.loadAutosave) {
         try {
-          const saved = await window.electronApi.loadAutosave();
+          const saved = await api.loadAutosave();
+          if (cancelled) return;
           if (saved?.data) {
-            const parsed = JSON.parse(saved.data);
-            if (parsed.components?.length > 0 || parsed.wires?.length > 0) {
-              setComponents(parsed.components || []);
-              setWires(parsed.wires || []);
-              if (parsed.circuitName) setCircuitName(parsed.circuitName);
-              // Reset ID counters to avoid collisions
-              const maxCompId = (parsed.components || []).reduce((max: number, c: PlacedComponent) => {
-                const num = parseInt(c.id.replace(/\D/g, ''), 10);
-                return isNaN(num) ? max : Math.max(max, num);
-              }, 0);
-              const maxWireId = (parsed.wires || []).reduce((max: number, w: Wire) => {
-                const num = parseInt(w.id.replace(/\D/g, ''), 10);
-                return isNaN(num) ? max : Math.max(max, num);
-              }, 0);
-              nextId = maxCompId + 1;
-              nextWireId = maxWireId + 1;
-              console.log(`Restored autosaved circuit (${parsed.components?.length} components, ${parsed.wires?.length} wires)`);
+            const result = parseCircuitText(saved.data, isKnownType);
+            if (!result.ok) {
+              showToast(`The last autosave couldn't be restored: ${result.error}`, 'error');
+            } else if (result.circuit.components.length > 0 || result.circuit.wires.length > 0) {
+              const c = result.circuit;
+              applyCircuit(c, { name: c.circuitName, filePath: c.currentFilePath, fresh: true, dirty: c.dirty ?? true });
+              restored = true;
+              lastAutosaved.current = saved.data;
+              console.log(`Restored autosaved circuit (${c.components.length} components, ${c.wires.length} wires)`);
             }
           }
-        } catch {
-          // Ignore corrupt autosave
+        } catch (err) {
+          if (!cancelled) showToast(`The last autosave couldn't be read: ${errorMessage(err)}`, 'error');
         }
       }
-    });
+      if (cancelled) return;
+      if (!restored) {
+        // An empty, untitled board: the base of the undo history, and clean.
+        history.reset([], []);
+        history.markSaved();
+        lastAutosaved.current = serializeAutosave({ components: [], wires: [], circuitName: 'untitled', dirty: false });
+      }
+      setRestoreDone(true);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Autosave circuit state on every change (debounced to 1 second)
+  // Autosave: at most once a second, only after the restore, and only when
+  // the circuit (not just the simulator's readings) changed. It keeps the
+  // file path and name, so a restart continues where you were.
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutosaved = useRef<string | null>(null);
+  const autosaveFailed = useRef(false);
   useEffect(() => {
-    if (!window.electronApi?.autosave) return;
-    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    const api = shellApi();
+    if (!restoreDone || !api?.autosave) return;
+    if (autosaveTimer.current) return;
     autosaveTimer.current = setTimeout(() => {
-      const data = JSON.stringify({ components, wires, circuitName });
-      window.electronApi!.autosave(data).catch(() => {});
+      autosaveTimer.current = null;
+      const data = serializeAutosave({
+        components: componentsRef.current,
+        wires: wiresRef.current,
+        circuitName: circuitNameRef.current,
+        currentFilePath: currentFilePathRef.current,
+        dirty: dirtyRef.current,
+      });
+      if (data === lastAutosaved.current) return;
+      api.autosave(data).then(() => {
+        lastAutosaved.current = data;
+        if (autosaveFailed.current) showToast('Autosave is working again.');
+        autosaveFailed.current = false;
+      }).catch((err) => {
+        if (!autosaveFailed.current) {
+          showToast(`Autosave failed: ${errorMessage(err)} Use Save to keep your work.`, 'error');
+        }
+        autosaveFailed.current = true;
+      });
     }, 1000);
-    return () => {
-      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
-    };
-  }, [components, wires, circuitName]);
+  }, [components, wires, circuitName, currentFilePath, dirty, restoreDone, showToast]);
+  useEffect(() => () => { if (autosaveTimer.current) clearTimeout(autosaveTimer.current); }, []);
 
   // Listen for menu actions from Electron — ref set up below after handlers are defined
   const menuActionRef = useRef<(action: string) => void>(() => {});
@@ -151,19 +271,26 @@ function App() {
     window.electronApi.onMenuAction((action) => menuActionRef.current(action));
   }, []);
 
-  // Update window title when circuit name changes
+  // Window title shows the circuit name, with * while there are unsaved changes.
   useEffect(() => {
-    const title = `${circuitName} — E101 Electronics`;
+    const title = `${circuitName}${dirty ? ' *' : ''} — E101 Electronics`;
     document.title = title;
     window.electronApi?.setTitle?.(title);
-  }, [circuitName]);
+  }, [circuitName, dirty]);
+
+  // A data folder problem (OneDrive missing, not writable…) stays visible.
+  useEffect(() => {
+    shellApi()?.getDataStatus?.()
+      .then((s) => { if (s?.problem) setDataProblem(s.problem); })
+      .catch(() => { /* older shell without the check */ });
+  }, []);
 
   // Restore saved sidebar width on mount.
   useEffect(() => {
     if (!window.electronApi?.getConfig) return;
     window.electronApi.getConfig().then((cfg) => {
       if (cfg.sidebarWidth) setSidebarWidth(cfg.sidebarWidth);
-    });
+    }).catch(() => { /* keep the default width */ });
   }, []);
 
   // Sidebar drag-to-resize. We attach window listeners on mousedown so the
@@ -181,7 +308,9 @@ function App() {
       if (!sidebarResizeStart.current) return;
       // Sidebar is on the right, so dragging LEFT (negative dx) widens it.
       const dx = e.clientX - sidebarResizeStart.current.x;
-      const next = Math.max(240, Math.min(720, sidebarResizeStart.current.width - dx));
+      // Never so wide that the board and toolbar get squeezed out.
+      const maxW = Math.max(240, Math.min(720, window.innerWidth - 220 - 560));
+      const next = Math.max(240, Math.min(maxW, sidebarResizeStart.current.width - dx));
       setSidebarWidth(next);
     };
     const onUp = () => {
@@ -189,7 +318,7 @@ function App() {
       sidebarResizeStart.current = null;
       // Persist the new width to config.
       if (window.electronApi?.chatSetSidebarWidth) {
-        window.electronApi.chatSetSidebarWidth(sidebarWidth);
+        window.electronApi.chatSetSidebarWidth(sidebarWidth).catch(() => {});
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -240,6 +369,29 @@ function App() {
     };
   }, [simRunning, simSpeed, simAccuracy]);
 
+  /**
+   * Change the circuit as one undoable step. Computes from the latest state
+   * (refs), so history is never pushed from inside a state updater.
+   */
+  const commitCircuit = useCallback((nextComponents: PlacedComponent[], nextWires: Wire[]) => {
+    componentsRef.current = nextComponents;
+    wiresRef.current = nextWires;
+    setComponents(nextComponents);
+    setWires(nextWires);
+    history.push(nextComponents, nextWires);
+  }, [history]);
+
+  const defaultProperties = (type: string): Record<string, number | string> => {
+    const def = COMPONENT_DEFINITIONS[type];
+    const defaults: Record<string, number | string> = {};
+    if (def?.properties) {
+      for (const [key, prop] of Object.entries(def.properties)) {
+        defaults[key] = prop.default;
+      }
+    }
+    return defaults;
+  };
+
   const handleDropComponent = useCallback((type: string, position: Point) => {
     if (type === 'power') {
       setPendingPowerDrop(position);
@@ -247,57 +399,48 @@ function App() {
     }
     const def = COMPONENT_DEFINITIONS[type];
     if (!def) return;
-    const defaults: Record<string, number | string> = {};
-    if (def.properties) {
-      for (const [key, prop] of Object.entries(def.properties)) {
-        defaults[key] = prop.default;
-      }
-    }
     const comp: PlacedComponent = {
       id: genId(),
       type,
       position,
       rotation: 0,
-      properties: defaults,
+      properties: defaultProperties(type),
       state: {},
     };
     // Reject drop if it would overlap an existing component
-    if (components.some((c) => componentsOverlap(comp, c))) return;
-    setComponents((prev) => {
-      const next = [...prev, comp];
-      history.push(next, wires);
-      return next;
-    });
-  }, [components, wires, history]);
+    if (componentsRef.current.some((c) => componentsOverlap(comp, c))) {
+      showToast('There is already a part there.');
+      return;
+    }
+    commitCircuit([...componentsRef.current, comp], wiresRef.current);
+    setSelectedComponentIds([comp.id]);
+    setSelectedWireId(null);
+  }, [commitCircuit, showToast]);
 
   /** Click-to-place: put the component at the first non-overlapping position
    *  near the top-left of the board so the user can see it and drag it. */
   const handleClickPlace = useCallback((type: string) => {
+    const current = componentsRef.current;
     if (type === 'power') {
       // Place power in the supply area, scan rows for a free spot
       for (let row = 0; row < 40; row++) {
         const position = { x: 0, y: row * GRID_H };
         const comp: PlacedComponent = {
-          id: genId(), type: 'power', position, rotation: 0,
+          id: 'probe', type: 'power', position, rotation: 0,
           properties: { voltage: 5, mode: 'DC', waveform: 'square' },
           state: {},
         };
-        if (!components.some((c) => componentsOverlap(comp, c))) {
+        if (!current.some((c) => componentsOverlap(comp, c))) {
           setPendingPowerDrop(position);
           return;
         }
       }
+      showToast('No free spot left in the supply area.');
       return;
     }
 
     const def = COMPONENT_DEFINITIONS[type];
     if (!def) return;
-    const defaults: Record<string, number | string> = {};
-    if (def.properties) {
-      for (const [key, prop] of Object.entries(def.properties)) {
-        defaults[key] = prop.default;
-      }
-    }
 
     // Choose placement column: DIP chips go at col 6 to straddle gap, others at col 2
     const placeCol = (def.width === 2) ? 6 : 2;
@@ -321,47 +464,31 @@ function App() {
     for (let row = 0; row < 45; row++) {
       const holeY = row * GRID_H + GRID_H / 2;
       const position = { x: holeX - pinOX, y: holeY - pinOY };
-      const comp: PlacedComponent = {
-        id: genId(), type, position, rotation: 0,
-        properties: defaults, state: {},
+      const probe: PlacedComponent = {
+        id: 'probe', type, position, rotation: 0,
+        properties: {}, state: {},
       };
-      if (!components.some((c) => componentsOverlap(comp, c))) {
-        setComponents((prev) => {
-          const next = [...prev, comp];
-          history.push(next, wires);
-          return next;
-        });
+      if (!current.some((c) => componentsOverlap(probe, c))) {
+        const comp: PlacedComponent = { ...probe, id: genId(), properties: defaultProperties(type) };
+        commitCircuit([...current, comp], wiresRef.current);
         setSelectedComponentIds([comp.id]);
+        setSelectedWireId(null);
         return;
       }
     }
-  }, [components, wires, history]);
+    showToast('No free spot left on the left edge of the board. Drag the part to a spot instead.');
+  }, [commitCircuit, showToast]);
 
-  /** Delete a custom component type — removes all instances, wires, definition, and disk file. */
-  const handleDeleteComponentType = useCallback((typeId: string) => {
-    const def = COMPONENT_DEFINITIONS[typeId];
-    if (!def) return;
-
-    const instanceCount = components.filter((c) => c.type === typeId).length;
-    const msg = instanceCount > 0
-      ? `Delete "${def.label}" and remove ${instanceCount} instance(s) from the board?`
-      : `Delete "${def.label}" component type?`;
-    if (!window.confirm(msg)) return;
-
-    // Remove all placed instances and their wires
-    const instanceIds = components.filter((c) => c.type === typeId).map((c) => c.id);
+  /** Remove a custom component type: every instance and its wires (undoable), its definition and its file. */
+  const deleteComponentType = useCallback((typeId: string) => {
+    const instanceIds = componentsRef.current.filter((c) => c.type === typeId).map((c) => c.id);
     if (instanceIds.length > 0) {
-      setComponents((prev) => {
-        const next = prev.filter((c) => c.type !== typeId);
-        setWires((prevWires) => {
-          const nextWires = prevWires.filter(
-            (w) => !instanceIds.includes(w.from.componentId) && !instanceIds.includes(w.to.componentId),
-          );
-          history.push(next, nextWires);
-          return nextWires;
-        });
-        return next;
-      });
+      commitCircuit(
+        componentsRef.current.filter((c) => c.type !== typeId),
+        wiresRef.current.filter(
+          (w) => !instanceIds.includes(w.from.componentId) && !instanceIds.includes(w.to.componentId),
+        ),
+      );
       setSelectedComponentIds((prev) => prev.filter((id) => !instanceIds.includes(id)));
     }
 
@@ -369,9 +496,30 @@ function App() {
     setCatalogVersion((v) => v + 1);
 
     if (window.electronApi?.deleteChip) {
-      window.electronApi.deleteChip(typeId).catch(() => {});
+      window.electronApi.deleteChip(typeId).catch((err) => {
+        showToast(`The chip file for "${typeId}" couldn't be deleted: ${errorMessage(err)}`, 'error');
+      });
     }
-  }, [components, history]);
+  }, [commitCircuit, showToast]);
+
+  /** Ask first (in-app, never window.confirm); built-in parts can't be deleted. */
+  const handleDeleteComponentType = useCallback((typeId: string) => {
+    const def = COMPONENT_DEFINITIONS[typeId];
+    if (!def || BUILT_IN_TYPES.has(typeId)) return;
+    const instanceCount = componentsRef.current.filter((c) => c.type === typeId).length;
+    const close = () => setConfirm(null);
+    setConfirm({
+      title: 'Delete custom part?',
+      message: instanceCount > 0
+        ? `Delete the part type "${def.label}" and remove ${instanceCount} of them from the board? The board change can be undone; the part type itself can't.`
+        : `Delete the part type "${def.label}"? This can't be undone.`,
+      onCancel: close,
+      buttons: [
+        { label: 'Delete', kind: 'danger', onClick: () => { close(); deleteComponentType(typeId); } },
+        { label: 'Cancel', onClick: close },
+      ],
+    });
+  }, [deleteComponentType]);
 
   const handlePowerConfigConfirm = useCallback((config: { mode: string; voltage: number; waveform: string }) => {
     if (!pendingPowerDrop) return;
@@ -387,26 +535,21 @@ function App() {
       },
       state: {},
     };
-    if (components.some((c) => componentsOverlap(comp, c))) {
-      setPendingPowerDrop(null);
+    setPendingPowerDrop(null);
+    if (componentsRef.current.some((c) => componentsOverlap(comp, c))) {
+      showToast('There is already a part there.');
       return;
     }
-    setComponents((prev) => {
-      const next = [...prev, comp];
-      history.push(next, wires);
-      return next;
-    });
-    setPendingPowerDrop(null);
-  }, [pendingPowerDrop, components, wires, history]);
+    commitCircuit([...componentsRef.current, comp], wiresRef.current);
+    setSelectedComponentIds([comp.id]);
+  }, [pendingPowerDrop, commitCircuit, showToast]);
 
+  // Dragging: the board previews positions live (no history), then reports
+  // the final positions once; that is one undo entry.
   const handleMoveComponent = useCallback((id: string, position: Point) => {
     setComponents((prev) => {
       const moving = prev.find((c) => c.id === id);
       if (!moving) return prev;
-      // Save start position on first move for undo
-      if (!dragStartPos.current) {
-        dragStartPos.current = { ...moving.position };
-      }
       const candidate = { ...moving, position };
       const wouldOverlap = prev.some((c) => c.id !== id && componentsOverlap(candidate, c));
       if (wouldOverlap) return prev; // reject the move
@@ -421,16 +564,14 @@ function App() {
     }));
   }, []);
 
-  const handleMoveEnd = useCallback(() => {
-    if (dragStartPos.current) {
-      dragStartPos.current = null;
-      // Push current state as a history entry after drag completes
-      setComponents((prev) => {
-        history.push(prev, wires);
-        return prev;
-      });
-    }
-  }, [wires, history]);
+  const handleMoveEnd = useCallback((moves: { id: string; position: Point }[] | null) => {
+    if (!moves || moves.length === 0) return;
+    const next = componentsRef.current.map((c) => {
+      const move = moves.find((m) => m.id === c.id);
+      return move ? { ...c, position: move.position } : c;
+    });
+    commitCircuit(next, wiresRef.current);
+  }, [commitCircuit]);
 
   const handleSelectComponent = useCallback((id: string | null, additive = false) => {
     if (id === null) {
@@ -451,32 +592,34 @@ function App() {
   }, []);
 
   const handleDeleteComponents = useCallback((ids: string[]) => {
-    setComponents((prev) => {
-      const next = prev.filter((c) => !ids.includes(c.id));
-      setWires((prevWires) => {
-        const nextWires = prevWires.filter(
-          (w) => !ids.includes(w.from.componentId) && !ids.includes(w.to.componentId)
-        );
-        history.push(next, nextWires);
-        return nextWires;
-      });
-      return next;
-    });
+    if (ids.length === 0) return;
+    commitCircuit(
+      componentsRef.current.filter((c) => !ids.includes(c.id)),
+      wiresRef.current.filter((w) => !ids.includes(w.from.componentId) && !ids.includes(w.to.componentId)),
+    );
     setSelectedComponentIds((prev) => prev.filter((entry) => !ids.includes(entry)));
-  }, [history]);
+  }, [commitCircuit]);
 
   const handleDeleteComponent = useCallback((id: string) => {
     handleDeleteComponents([id]);
   }, [handleDeleteComponents]);
 
   const handleDeleteWire = useCallback((id: string) => {
-    setWires((prev) => {
-      const next = prev.filter((w) => w.id !== id);
-      history.push(components, next);
-      return next;
-    });
+    commitCircuit(componentsRef.current, wiresRef.current.filter((w) => w.id !== id));
     setSelectedWireId((prev) => prev === id ? null : prev);
-  }, [components, history]);
+  }, [commitCircuit]);
+
+  /** Rotate parts by `degrees` (90 = rotate, 180 = flip an LED's polarity) as one undo entry. */
+  const rotateComponents = useCallback((ids: string[], degrees: number) => {
+    const targets = componentsRef.current.filter((c) => ids.includes(c.id) && c.type !== 'power');
+    if (targets.length === 0) return;
+    commitCircuit(
+      componentsRef.current.map((c) =>
+        targets.includes(c) ? { ...c, rotation: (c.rotation + degrees) % 360 } : c,
+      ),
+      wiresRef.current,
+    );
+  }, [commitCircuit]);
 
   const handleToggleSwitch = useCallback((id: string) => {
     setComponents((prev) =>
@@ -517,48 +660,89 @@ function App() {
         waypoints: [],
         color: WIRE_COLORS[wireColorIdx++ % WIRE_COLORS.length],
       };
-      setWires((prev) => {
-        const next = [...prev, wire];
-        history.push(components, next);
-        return next;
-      });
+      commitCircuit(componentsRef.current, [...wiresRef.current, wire]);
       setWiringFrom(null);
     },
-    [wiringFrom, components, history]
+    [wiringFrom, commitCircuit]
   );
 
+  /** Set properties on one part as one undo entry. */
+  const setPartProperties = useCallback((componentId: string, props: Record<string, number | string>) => {
+    commitCircuit(
+      componentsRef.current.map((c) => (c.id === componentId ? { ...c, properties: { ...c.properties, ...props } } : c)),
+      wiresRef.current,
+    );
+  }, [commitCircuit]);
+
   const handlePropertyChange = useCallback((componentId: string, key: string, value: number | string) => {
-    setComponents((prev) => {
-      const next = prev.map((c) => (c.id === componentId ? { ...c, properties: { ...c.properties, [key]: value } } : c));
-      history.push(next, wires);
-      return next;
-    });
-  }, [wires, history]);
+    setPartProperties(componentId, { [key]: value });
+  }, [setPartProperties]);
+
+  /** Live preview (potentiometer drag): no undo entry; the release commits. */
+  const handlePropertyPreview = useCallback((componentId: string, key: string, value: number | string) => {
+    setComponents((prev) => prev.map((c) => (c.id === componentId ? { ...c, properties: { ...c.properties, [key]: value } } : c)));
+  }, []);
 
   const handleToggleSimulation = useCallback(() => {
     if (simRunning) {
       setSimRunning(false);
       setSimTime(0);
       simulator.current.reset();
-      setComponents((prev) => prev.map((c) => ({ ...c, state: {} })));
+      // Readings reset; a switch keeps its position.
+      setComponents((prev) => prev.map((c): PlacedComponent => ({
+        ...c,
+        state: c.type === 'switch' && c.state.closed ? { closed: c.state.closed } : {},
+      })));
       scope.clearTraces();
     } else {
+      // Firmware lives in properties.hex (saved with the circuit). Make sure
+      // the simulator has it, e.g. after a restart or an Undo.
+      for (const c of componentsRef.current) {
+        if (c.type !== 'atmega328' || typeof c.properties.hex !== 'string' || !c.properties.hex) continue;
+        if (simulator.current.isAVRLoaded(c.id)) continue;
+        try {
+          loadFirmware(simulator.current, c.id, c.properties.hex);
+        } catch (err) {
+          showToast(`The program on ${c.id} couldn't be loaded: ${errorMessage(err)}`, 'error');
+        }
+      }
       setSimRunning(true);
     }
-  }, [simRunning, scope]);
+  }, [simRunning, scope, showToast]);
 
-  const handleClearCircuit = useCallback(() => {
+  /** Empty the board (same file, same name) as one undoable step. */
+  const clearBoard = useCallback(() => {
     setSimRunning(false);
     setSimTime(0);
-    setComponents([]);
-    setWires([]);
+    simulator.current.reset();
+    commitCircuit([], []);
     setWiringFrom(null);
     setSelectedComponentIds([]);
     setSelectedWireId(null);
+  }, [commitCircuit]);
+
+  /** A new, untitled circuit (undoable: Undo brings the old parts back). */
+  const newCircuit = useCallback(() => {
+    clearBoard();
     setCircuitName('untitled');
     setCurrentFilePath(undefined);
-    history.reset([], []);
-  }, [history]);
+    history.markSaved();
+    setFitRequest((n) => n + 1);
+  }, [clearBoard, history]);
+
+  // Clear is undoable, so it needs no question unless there are unsaved
+  // changes; then it asks (in-app) like New and loading an example.
+  const handleClearCircuit = useCallback(() => {
+    if (componentsRef.current.length === 0 && wiresRef.current.length === 0) return;
+    guardUnsavedRef.current('Clear the board?', `"${circuitNameRef.current}" has changes that aren't saved. Clearing can be undone, but save first if you want to keep them in the file.`, clearBoard, 'Clear anyway');
+  }, [clearBoard]);
+
+  const handleNewCircuit = useCallback(() => {
+    guardUnsavedRef.current('Start a new circuit?', `"${circuitNameRef.current}" has changes that aren't saved.`, newCircuit, "Don't save");
+  }, [newCircuit]);
+
+  /** Set from below once save is defined. */
+  const guardUnsavedRef = useRef<(title: string, message: string, action: () => void, actionLabel?: string) => void>((_t, _m, a) => a());
 
   // ---- AI Circuit Tool Executor ---- //
   //
@@ -873,372 +1057,337 @@ function App() {
     [history],
   );
 
-  const showStatus = useCallback((msg: string) => {
-    setSaveStatus(msg);
-    if (saveStatusTimer.current) clearTimeout(saveStatusTimer.current);
-    saveStatusTimer.current = setTimeout(() => setSaveStatus(null), 3000);
+  /** A problem the user must read (bad file, failed open): an in-app message with an OK button. */
+  const showProblem = useCallback((title: string, message: string) => {
+    const close = () => setConfirm(null);
+    setConfirm({ title, message, onCancel: close, buttons: [{ label: 'OK', kind: 'primary', onClick: close }] });
   }, []);
-
-  const loadCircuitState = useCallback((data: { components: PlacedComponent[]; wires: Wire[] }, name?: string, filePath?: string) => {
-    setComponents(data.components);
-    setWires(data.wires);
-    setSelectedComponentIds([]);
-    setWiringFrom(null);
-    setSimRunning(false);
-    setSimTime(0);
-    if (name) setCircuitName(name);
-    if (filePath) setCurrentFilePath(filePath);
-    const maxCompId = data.components.reduce((max, c) => {
-      const num = parseInt(c.id.replace(/\D/g, ''), 10);
-      return isNaN(num) ? max : Math.max(max, num);
-    }, 0);
-    const maxWireId = data.wires.reduce((max, w) => {
-      const num = parseInt(w.id.replace(/\D/g, ''), 10);
-      return isNaN(num) ? max : Math.max(max, num);
-    }, 0);
-    nextId = maxCompId + 1;
-    nextWireId = maxWireId + 1;
-    history.reset(data.components, data.wires);
-  }, [history]);
 
   // ---- Save ---- //
 
-  const handleSave = useCallback(async () => {
-    const data = JSON.stringify({ components, wires }, null, 2);
-    if (window.electronApi) {
-      const result = await window.electronApi.saveCircuit(data, currentFilePath);
-      if (result) {
+  /**
+   * Save writes to the current file; Save As (or a circuit that was never
+   * saved) asks for a name. Resolves true when the circuit is on disk.
+   */
+  const handleSave = useCallback(async (saveAs = false): Promise<boolean> => {
+    const data = serializeCircuit(componentsRef.current, wiresRef.current);
+    const api = shellApi();
+    if (api) {
+      try {
+        const path = currentFilePathRef.current;
+        const result = saveAs && api.saveCircuitAs
+          ? await api.saveCircuitAs(data, path)
+          : await api.saveCircuit(data, path);
+        if (!result) return false; // cancelled
         setCircuitName(result.name);
         setCurrentFilePath(result.filePath);
-        showStatus(`Saved "${result.name}.ecx"`);
+        history.markSaved();
+        showToast(`Saved "${result.name}.ecx"`);
+        return true;
+      } catch (err) {
+        showToast(`Couldn't save the circuit: ${errorMessage(err)}`, 'error');
+        return false;
       }
-    } else {
-      // Browser fallback: download
-      const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${circuitName}.ecx`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showStatus('Downloaded');
     }
-  }, [components, wires, currentFilePath, circuitName, showStatus]);
+    // Browser fallback: download
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${circuitNameRef.current}.ecx`;
+    a.click();
+    URL.revokeObjectURL(url);
+    history.markSaved();
+    showToast('Downloaded');
+    return true;
+  }, [history, showToast]);
+
+  /** Before replacing the circuit: if it has unsaved changes, ask (Save first / go ahead / Cancel). */
+  const guardUnsaved = useCallback((title: string, message: string, action: () => void, actionLabel = "Don't save") => {
+    const hasContent = componentsRef.current.length > 0 || wiresRef.current.length > 0;
+    if (!history.isDirty() || !hasContent) { action(); return; }
+    const close = () => setConfirm(null);
+    setConfirm({
+      title,
+      message,
+      onCancel: close,
+      buttons: [
+        { label: 'Save first', kind: 'primary', onClick: async () => { close(); if (await handleSave()) action(); } },
+        { label: actionLabel, onClick: () => { close(); action(); } },
+        { label: 'Cancel', onClick: close },
+      ],
+    });
+  }, [history, handleSave]);
+  guardUnsavedRef.current = guardUnsaved;
 
   // ---- Open ---- //
 
-  const handleLoad = useCallback(async () => {
-    if (window.electronApi) {
-      const result = await window.electronApi.loadCircuit();
-      if (result) {
-        try {
-          const parsed = JSON.parse(result.data);
-          if (parsed.components && parsed.wires) {
-            loadCircuitState(parsed, result.name, result.filePath);
-            showStatus(`Opened "${result.name}.ecx"`);
-          }
-        } catch {
-          showStatus('Invalid circuit file');
-        }
-      }
-    } else {
-      // Browser fallback: file picker
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.ecx';
-      input.onchange = async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        const text = await file.text();
-        try {
-          const parsed = JSON.parse(text);
-          if (parsed.components && parsed.wires) {
-            const name = file.name.replace(/\.ecx$/, '');
-            loadCircuitState(parsed, name);
-            showStatus(`Loaded "${file.name}"`);
-          }
-        } catch {
-          showStatus('Invalid circuit file');
-        }
-      };
-      input.click();
+  const openCircuitText = useCallback((text: string, name: string, filePath?: string) => {
+    const result = parseCircuitText(text, isKnownType);
+    if (!result.ok) {
+      showProblem("Can't open this file", `This file isn't a valid circuit: ${result.error}`);
+      return;
     }
-  }, [loadCircuitState, showStatus]);
+    applyCircuit(result.circuit, { name, filePath, fresh: true });
+    showToast(result.droppedWires > 0
+      ? `Opened "${name}" (${result.droppedWires} wire(s) to missing parts were left out)`
+      : `Opened "${name}"`);
+  }, [applyCircuit, showProblem, showToast]);
+
+  const openCircuit = useCallback(async () => {
+    const api = shellApi();
+    if (api) {
+      try {
+        const result = await api.loadCircuit();
+        if (result) openCircuitText(result.data, result.name, result.filePath);
+      } catch (err) {
+        showProblem("Couldn't open the file", errorMessage(err));
+      }
+      return;
+    }
+    // Browser fallback: file picker
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.ecx';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      openCircuitText(await file.text(), file.name.replace(/\.ecx$/, ''));
+    };
+    input.click();
+  }, [openCircuitText, showProblem]);
+
+  const handleLoad = useCallback(() => {
+    guardUnsaved('Open another circuit?', `"${circuitNameRef.current}" has changes that aren't saved.`, () => { void openCircuit(); });
+  }, [guardUnsaved, openCircuit]);
+
+  // ---- Undo / redo / clipboard ---- //
+
+  const applySnapshot = useCallback((snap: { components: PlacedComponent[]; wires: Wire[] } | null) => {
+    if (!snap) return;
+    componentsRef.current = snap.components;
+    wiresRef.current = snap.wires;
+    setComponents(snap.components);
+    setWires(snap.wires);
+    setSelectedComponentIds([]);
+    setSelectedWireId(null);
+    setWiringFrom(null);
+  }, []);
+  const doUndo = useCallback(() => applySnapshot(history.undo()), [applySnapshot, history]);
+  const doRedo = useCallback(() => applySnapshot(history.redo()), [applySnapshot, history]);
+
+  const doCopy = useCallback(() => {
+    const comp = componentsRef.current.find((c) => c.id === selectedComponentIds[0]);
+    if (comp) clipboard.current = { ...comp, properties: { ...comp.properties } };
+  }, [selectedComponentIds]);
+
+  const doPaste = useCallback(() => {
+    const src = clipboard.current;
+    if (!src || !COMPONENT_DEFINITIONS[src.type]) return;
+    // Offset paste by 1 grid unit right and down
+    const newComp: PlacedComponent = {
+      id: genId(), type: src.type,
+      position: { x: src.position.x + GRID_W, y: src.position.y + GRID_H },
+      rotation: src.rotation, properties: { ...src.properties }, state: {},
+    };
+    if (componentsRef.current.some((c) => componentsOverlap(newComp, c))) {
+      showToast('No room to paste next to the copied part.');
+      return;
+    }
+    commitCircuit([...componentsRef.current, newComp], wiresRef.current);
+    setSelectedComponentIds([newComp.id]);
+    // Update clipboard to point to new component for repeated paste
+    clipboard.current = newComp;
+  }, [commitCircuit, showToast]);
+
+  // ---- Examples ---- //
+
+  const loadDemo = useCallback((demoName?: string) => {
+    const demoMap: Record<string, { name: string; create: () => { components: PlacedComponent[]; wires: Wire[] }; hex?: string }> = {
+      blink:      { name: 'LED Blink Demo',     create: createBlinkDemoCircuit },
+      counter:    { name: '7-Seg Counter Demo',  create: createCounterDemoCircuit },
+      'avr-blink': { name: 'AVR Blink Demo',    create: createAVRBlinkDemoCircuit, hex: AVR_BLINK_HEX },
+      matrix:     { name: '5x7 Matrix Demo',    create: createMatrixDemoCircuit, hex: AVR_MATRIX_HEX },
+      necklace:   { name: 'Necklace Demo',      create: createNecklaceDemoCircuit, hex: AVR_NECKLACE_HEX },
+    };
+    const entry = demoMap[demoName ?? 'blink'] ?? demoMap.blink;
+
+    // Demos are generated from code. Their firmware goes into the
+    // ATmega's properties.hex so Save and autosave keep it.
+    const circuit = entry.create();
+    const components = entry.hex
+      ? circuit.components.map((c) => (c.type === 'atmega328' && !c.properties.hex ? { ...c, properties: { ...c.properties, hex: entry.hex! } } : c))
+      : circuit.components;
+    // Not a file: no current path, so Save asks where to put a copy, and
+    // circuits/<Demo>.ecx is never overwritten. Undo brings back what was there.
+    applyCircuit({ components, wires: circuit.wires }, { name: entry.name, fresh: false });
+    showToast(`Loaded the example "${entry.name}". Press Run to start it.`);
+  }, [applyCircuit, showToast]);
+
+  const handleLoadDemo = useCallback((demoName?: string) => {
+    guardUnsaved('Load an example?', `"${circuitNameRef.current}" has changes that aren't saved. Loading an example can be undone.`, () => loadDemo(demoName), 'Load anyway');
+  }, [guardUnsaved, loadDemo]);
+
+  /** Any dialog open (ours or one that draws its own overlay). */
+  const anyModalOpen = () => showUsage || !!document.querySelector('.modal-overlay');
 
   // Update menu action handler now that save/load are defined
   useEffect(() => {
     menuActionRef.current = (action: string) => {
+      // Menu items act on the board; not while a dialog is open.
+      if (anyModalOpen() && action !== 'about' && action !== 'settings') return;
       switch (action) {
         case 'about': setShowAbout(true); break;
         case 'settings': setShowSettings(true); break;
-        case 'save': handleSave(); break;
+        case 'save': void handleSave(); break;
+        case 'save-as': void handleSave(true); break;
         case 'open': handleLoad(); break;
-        case 'undo': {
-          const snap = history.undo();
-          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentIds([]); setSelectedWireId(null); }
-          break;
-        }
-        case 'redo': {
-          const snap = history.redo();
-          if (snap) { setComponents(snap.components); setWires(snap.wires); setSelectedComponentIds([]); setSelectedWireId(null); }
-          break;
-        }
-        case 'copy': {
-          if (selectedComponentIds.length > 0) {
-            const comp = components.find((c) => c.id === selectedComponentIds[0]);
-            if (comp) clipboard.current = comp;
-          }
-          break;
-        }
-        case 'paste': {
-          if (clipboard.current) {
-            const src = clipboard.current;
-            const def = COMPONENT_DEFINITIONS[src.type];
-            if (!def) break;
-            const newPos = { x: src.position.x + GRID_W, y: src.position.y + GRID_H };
-            const newComp: PlacedComponent = {
-              id: genId(), type: src.type, position: newPos,
-              rotation: src.rotation, properties: { ...src.properties }, state: {},
-            };
-            if (!components.some((c) => componentsOverlap(newComp, c))) {
-              setComponents((prev) => {
-                const next = [...prev, newComp];
-                history.push(next, wires);
-                return next;
-              });
-              setSelectedComponentIds([newComp.id]);
-              clipboard.current = newComp;
-            }
-          }
-          break;
-        }
+        case 'new': handleNewCircuit(); break;
+        case 'undo': doUndo(); break;
+        case 'redo': doRedo(); break;
+        case 'copy': doCopy(); break;
+        case 'paste': doPaste(); break;
       }
     };
-  }, [handleSave, handleLoad, history, selectedComponentIds, components, wires]);
+  });
 
-  // ---- Demo ---- //
-
-  const handleLoadDemo = useCallback(async (demoName?: string) => {
-    const demoMap: Record<string, { name: string; create: () => { components: PlacedComponent[]; wires: Wire[] } }> = {
-      blink:      { name: 'LED Blink Demo',     create: createBlinkDemoCircuit },
-      counter:    { name: '7-Seg Counter Demo',  create: createCounterDemoCircuit },
-      'avr-blink': { name: 'AVR Blink Demo',    create: createAVRBlinkDemoCircuit },
-      matrix:     { name: '5x7 Matrix Demo',    create: createMatrixDemoCircuit },
-      necklace:   { name: 'Necklace Demo',      create: createNecklaceDemoCircuit },
-    };
-    const key = demoName ?? 'blink';
-    const entry = demoMap[key] ?? demoMap.blink;
-
-    // Always generate from code (demos are code-defined, not user files)
-    const circuit = entry.create();
-    loadCircuitState(circuit, entry.name);
-    simulator.current.reset();
-
-    // For AVR demos, pre-load the hex program
-    if (key === 'avr-blink') {
-      simulator.current.loadAVRProgram('avr1', AVR_BLINK_HEX);
-    } else if (key === 'matrix') {
-      console.log('Loading matrix demo with AVR firmware');
-      simulator.current.loadAVRProgram('avr1', AVR_MATRIX_HEX);
-      showStatus('5x7 matrix demo loaded with AVR firmware');
-    } else if (key === 'necklace') {
-      console.log('Loading necklace demo with AVR firmware');
-      simulator.current.loadAVRProgram('avr1', AVR_NECKLACE_HEX);
-      showStatus('Necklace demo loaded with AVR firmware');
-    }
-
-    // Save to disk so user can find/modify them
-    if (window.electronApi?.saveDemo) {
-      const data = JSON.stringify(circuit, null, 2);
-      const filePath = await window.electronApi.saveDemo(entry.name, data);
-      setCurrentFilePath(filePath);
-    } else {
-      setCurrentFilePath(undefined);
-    }
-  }, [loadCircuitState]);
-
-  // Keyboard shortcuts
+  // Keyboard shortcuts. All of them are off while a dialog is open or a
+  // text field / select has focus (the field keeps its own Ctrl+Z etc.).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+      if (e.defaultPrevented) return;
+      if (shortcutsBlocked(e, anyModalOpen())) return;
       const ctrl = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
 
-      if (ctrl && e.key === 's') {
-        e.preventDefault();
-        handleSave();
-        return;
-      }
-      if (ctrl && e.key === 'o') {
-        e.preventDefault();
-        handleLoad();
-        return;
-      }
-      // Undo
-      if (ctrl && e.key === 'z' && !e.shiftKey) {
-        e.preventDefault();
-        const snap = history.undo();
-        if (snap) {
-          setComponents(snap.components);
-          setWires(snap.wires);
-          setSelectedComponentIds([]);
-          setSelectedWireId(null);
-        }
-        return;
-      }
+      if (ctrl && key === 's') { e.preventDefault(); void handleSave(e.shiftKey); return; }
+      if (ctrl && key === 'o') { e.preventDefault(); handleLoad(); return; }
+      if (ctrl && key === 'z' && !e.shiftKey) { e.preventDefault(); doUndo(); return; }
       // Redo (Ctrl+Shift+Z or Ctrl+Y)
-      if ((ctrl && e.shiftKey && (e.key === 'Z' || e.key === 'z')) || (ctrl && e.key === 'y')) {
-        e.preventDefault();
-        const snap = history.redo();
-        if (snap) {
-          setComponents(snap.components);
-          setWires(snap.wires);
-          setSelectedComponentIds([]);
-          setSelectedWireId(null);
-        }
-        return;
-      }
-      // Copy
-      if (ctrl && e.key === 'c' && !isInput) {
-        if (selectedComponentIds.length > 0) {
-          const comp = components.find((c) => c.id === selectedComponentIds[0]);
-          if (comp) clipboard.current = comp;
-        }
-        return;
-      }
-      // Paste
-      if (ctrl && e.key === 'v' && !isInput) {
-        if (clipboard.current) {
-          const src = clipboard.current;
-          const def = COMPONENT_DEFINITIONS[src.type];
-          if (!def) return;
-          // Offset paste by 1 grid unit right and down
-          const newPos = { x: src.position.x + GRID_W, y: src.position.y + GRID_H };
-          const newComp: PlacedComponent = {
-            id: genId(),
-            type: src.type,
-            position: newPos,
-            rotation: src.rotation,
-            properties: { ...src.properties },
-            state: {},
-          };
-          // Check overlap
-          if (components.some((c) => componentsOverlap(newComp, c))) return;
-          setComponents((prev) => {
-            const next = [...prev, newComp];
-            history.push(next, wires);
-            return next;
-          });
-          setSelectedComponentIds([newComp.id]);
-          // Update clipboard to point to new component for repeated paste
-          clipboard.current = newComp;
-        }
-        return;
-      }
+      if ((ctrl && e.shiftKey && key === 'z') || (ctrl && key === 'y')) { e.preventDefault(); doRedo(); return; }
+      if (ctrl && key === 'c') { doCopy(); return; }
+      if (ctrl && key === 'v') { e.preventDefault(); doPaste(); return; }
+      if (ctrl) return;
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (isInput) return;
-        if (selectedComponentIds.length > 0) {
-          handleDeleteComponents(selectedComponentIds);
-        }
-        if (selectedWireId) {
-          handleDeleteWire(selectedWireId);
-        }
+        e.preventDefault();
+        if (selectedComponentIds.length > 0) handleDeleteComponents(selectedComponentIds);
+        if (selectedWireId) handleDeleteWire(selectedWireId);
         return;
       }
       if (e.key === 'Escape') {
-        if (isInput) return;
         setWiringFrom(null);
         setSelectedComponentIds([]);
         setSelectedWireId(null);
         setContextMenu(null);
         return;
       }
-      if (e.key === 'r' || e.key === 'R') {
-        if (isInput) return;
-        if (selectedComponentIds.length === 1) {
-          const selectedId = selectedComponentIds[0];
-          setComponents((prev) => {
-            const next = prev.map((c) =>
-              c.id === selectedId
-                ? { ...c, rotation: (c.rotation + 90) % 360 }
-                : c
-            );
-            history.push(next, wires);
-            return next;
-          });
-        }
+      if (key === 'r' && !e.altKey) {
+        if (selectedComponentIds.length > 0) rotateComponents(selectedComponentIds, 90);
         return;
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-}, [handleSave, handleLoad, selectedComponentIds, selectedWireId, handleDeleteComponents, handleDeleteWire, components, wires, history]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handleSave, handleLoad, doUndo, doRedo, doCopy, doPaste, selectedComponentIds, selectedWireId, handleDeleteComponents, handleDeleteWire, rotateComponents, showUsage]);
+
+  // Closing the window with unsaved changes asks first (shell contract).
+  const closeRequestRef = useRef<() => void>(() => {});
+  closeRequestRef.current = () => {
+    const api = shellApi();
+    const hasContent = componentsRef.current.length > 0 || wiresRef.current.length > 0;
+    if (!history.isDirty() || !hasContent) { api?.confirmClose?.(); return; }
+    const close = () => setConfirm(null);
+    setConfirm({
+      title: 'Save changes before closing?',
+      message: `"${circuitNameRef.current}" has changes that aren't saved.`,
+      onCancel: close,
+      buttons: [
+        { label: 'Save', kind: 'primary', onClick: async () => { close(); if (await handleSave()) api?.confirmClose?.(); } },
+        { label: "Don't save", kind: 'danger', onClick: () => { close(); api?.confirmClose?.(); } },
+        { label: 'Cancel', onClick: close },
+      ],
+    });
+  };
+  useEffect(() => {
+    const off = shellApi()?.onCloseRequest?.(() => closeRequestRef.current());
+    return () => { if (typeof off === 'function') off(); };
+  }, []);
 
   const selectedComponent = components.find((c) => c.id === selectedComponentIds[0]) ?? null;
   const selectedWire = wires.find((w) => w.id === selectedWireId) ?? null;
 
   const handleWireColorChange = useCallback((wireId: string, color: string) => {
-    setWires((prev) => {
-      const next = prev.map((w) => w.id === wireId ? { ...w, color } : w);
-      history.push(components, next);
-      return next;
-    });
-  }, [components, history]);
+    commitCircuit(componentsRef.current, wiresRef.current.map((w) => w.id === wireId ? { ...w, color } : w));
+  }, [commitCircuit]);
+
+  const download = useCallback((text: string, type: string, fileName: string, what: string) => {
+    try {
+      const blob = new Blob([text], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Exported ${what}`);
+    } catch (err) {
+      showToast(`Couldn't export the ${what}: ${errorMessage(err)}`, 'error');
+    }
+  }, [showToast]);
 
   const handleExportNetlist = useCallback(() => {
-    const netlist = generateKiCadNetlist(components, wires);
-    const blob = new Blob([netlist], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${circuitName}.net`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showStatus('Exported netlist');
-  }, [components, wires, circuitName, showStatus]);
+    try {
+      download(generateKiCadNetlist(components, wires), 'text/plain', `${circuitName}.net`, 'netlist');
+    } catch (err) {
+      showToast(`Couldn't build the netlist: ${errorMessage(err)}`, 'error');
+    }
+  }, [components, wires, circuitName, download, showToast]);
 
   const handleExportBOM = useCallback(() => {
-    const bom = generateBOM(components);
-    const blob = new Blob([bom], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${circuitName}-bom.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showStatus('Exported BOM');
-  }, [components, circuitName, showStatus]);
+    try {
+      download(generateBOM(components), 'text/csv', `${circuitName}-bom.csv`, 'bill of materials');
+    } catch (err) {
+      showToast(`Couldn't build the bill of materials: ${errorMessage(err)}`, 'error');
+    }
+  }, [components, circuitName, download, showToast]);
+
+  /** Put a program on an ATmega: stored in properties.hex (saved with the circuit) and loaded now. */
+  const installHex = useCallback((componentId: string, hex: string, extra: Record<string, string> = {}): boolean => {
+    try {
+      loadFirmware(simulator.current, componentId, hex);
+    } catch (err) {
+      showProblem("Couldn't load the program", `This isn't a valid Intel HEX file: ${errorMessage(err)}`);
+      return false;
+    }
+    setPartProperties(componentId, { hex, ...extra });
+    return true;
+  }, [setPartProperties, showProblem]);
 
   const handleLoadHex = useCallback(async (componentId: string) => {
     if (window.electronApi?.loadHex) {
-      const result = await window.electronApi.loadHex();
-      if (result) {
-        try {
-          simulator.current.loadAVRProgram(componentId, result.data);
-          showStatus(`Loaded "${result.name}"`);
-        } catch (e) {
-          showStatus('Invalid hex file');
-        }
+      try {
+        const result = await window.electronApi.loadHex();
+        if (result && installHex(componentId, result.data)) showToast(`Loaded "${result.name}"`);
+      } catch (err) {
+        showProblem("Couldn't open the hex file", errorMessage(err));
       }
-    } else {
-      // Browser fallback: file picker
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.hex';
-      input.onchange = async () => {
-        const file = input.files?.[0];
-        if (!file) return;
-        const text = await file.text();
-        try {
-          simulator.current.loadAVRProgram(componentId, text);
-          showStatus(`Loaded "${file.name}"`);
-        } catch {
-          showStatus('Invalid hex file');
-        }
-      };
-      input.click();
+      return;
     }
-  }, [showStatus]);
+    // Browser fallback: file picker
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.hex';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      if (installHex(componentId, await file.text())) showToast(`Loaded "${file.name}"`);
+    };
+    input.click();
+  }, [installHex, showProblem, showToast]);
+
+  const sketchTarget = sketchTargetId ? components.find((c) => c.id === sketchTargetId) ?? null : null;
 
   const scopeTraces = scope.getTraces(components);
 
@@ -1246,6 +1395,12 @@ function App() {
     <div className="app-shell">
       <Sidebar onClick={handleClickPlace} onDeleteType={handleDeleteComponentType} catalogVersion={catalogVersion} />
       <div className="main-area">
+        {dataProblem && (
+          <div className="data-notice" role="alert">
+            <strong>Data folder problem:</strong> <span>{dataProblem}</span>
+            <button type="button" className="data-notice-close" aria-label="Hide this notice" onClick={() => setDataProblem(null)}>×</button>
+          </div>
+        )}
         <Toolbar
           simRunning={simRunning}
           onToggleSimulation={handleToggleSimulation}
@@ -1258,7 +1413,17 @@ function App() {
           onShowPCB={() => setShowPCBView(true)}
           onExportNetlist={handleExportNetlist}
           onExportBOM={handleExportBOM}
-          saveStatus={saveStatus}
+          onNew={handleNewCircuit}
+          onOpen={handleLoad}
+          onSave={() => { void handleSave(); }}
+          onSaveAs={() => { void handleSave(true); }}
+          onUndo={doUndo}
+          onRedo={doRedo}
+          canUndo={history.canUndo()}
+          canRedo={history.canRedo()}
+          circuitName={circuitName}
+          dirty={dirty}
+          simTime={simTime}
         />
         <div className="canvas-container">
           <Breadboard
@@ -1280,16 +1445,19 @@ function App() {
             onSetSwitchClosed={handleSetSwitchClosed}
             wireCurrents={simulator.current.wireCurrents}
             pinHoleVoltages={simulator.current.pinHoleVoltages}
+            fitRequest={fitRequest}
             onContextMenu={(e, compId, wireId) => {
               setContextMenu({ x: e.clientX, y: e.clientY, componentId: compId, wireId });
             }}
           />
+          <ProblemsPanel components={components} onSelect={(id) => handleSelectComponent(id)} />
           {wiringFrom && (
-            <div className="wiring-hint">Click a pin to complete the wire, or press Escape to cancel</div>
+            <div className="wiring-hint">Click a pin or hole to finish the wire, or press Escape to cancel</div>
           )}
-          {components.length === 0 && (
+          {components.length === 0 && restoreDone && (
             <div className="empty-state">
-              <p>Drag components from the sidebar or click Demo to load the LED blink circuit</p>
+              <p>Click a part in the list on the left to put it on the board, or drag it to a spot.</p>
+              <p>Or open a ready-made circuit from <strong>Examples ▾</strong> in the toolbar.</p>
             </div>
           )}
         </div>
@@ -1319,15 +1487,16 @@ function App() {
         <div
           className={`sidebar-resize-handle ${sidebarResizing ? 'dragging' : ''}`}
           onMouseDown={handleSidebarResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the side panel"
         />
         <PropertiesPanel
           component={selectedComponent}
           onPropertyChange={handlePropertyChange}
-          onRotate={(id) => {
-            setComponents((prev) => prev.map((c) =>
-              c.id === id ? { ...c, rotation: (c.rotation + 90) % 360 } : c
-            ));
-          }}
+          onPropertyPreview={handlePropertyPreview}
+          onRotate={(id) => rotateComponents([id], 90)}
+          onFlipPolarity={(id) => rotateComponents([id], 180)}
           selectedWire={selectedWire}
           onWireColorChange={handleWireColorChange}
           onProbe={selectedComponent ? () => {
@@ -1336,11 +1505,10 @@ function App() {
           } : undefined}
           isProbed={selectedComponent ? scope.probedIds.has(selectedComponent.id) : false}
           onLoadHex={selectedComponent?.type === 'atmega328' ? () => handleLoadHex(selectedComponent.id) : undefined}
-          isHexLoaded={selectedComponent?.type === 'atmega328' ? simulator.current.isAVRLoaded(selectedComponent.id) : false}
-          onWriteSketch={selectedComponent?.type === 'atmega328' ? () => {
-            sketchTargetId.current = selectedComponent.id;
-            setShowSketchEditor(true);
-          } : undefined}
+          isHexLoaded={selectedComponent?.type === 'atmega328'
+            ? simulator.current.isAVRLoaded(selectedComponent.id) || !!selectedComponent.properties.hex
+            : false}
+          onWriteSketch={selectedComponent?.type === 'atmega328' ? () => setSketchTargetId(selectedComponent.id) : undefined}
         />
         <ChatPanel
           components={components}
@@ -1360,43 +1528,53 @@ function App() {
       )}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
-      {showUsage && <UsagePanel onClose={() => setShowUsage(false)} />}
+      {showUsage && (
+        <ModalLayer onClose={() => setShowUsage(false)}>
+          <UsagePanel onClose={() => setShowUsage(false)} />
+        </ModalLayer>
+      )}
       {showPCBView && <PCBView components={components} wires={wires} onClose={() => setShowPCBView(false)} />}
-      {showSketchEditor && (
+      {sketchTargetId && (
         <SketchEditor
-          onCompiled={(hex) => {
-            if (sketchTargetId.current) {
-              simulator.current.loadAVRProgram(sketchTargetId.current, hex);
-              showStatus('Sketch compiled and loaded');
-            }
-            setShowSketchEditor(false);
+          initialSketch={typeof sketchTarget?.properties.sketch === 'string' ? sketchTarget.properties.sketch : undefined}
+          onCompiled={(hex, sketch) => {
+            if (installHex(sketchTargetId, hex, { sketch })) showToast('Sketch compiled and loaded');
           }}
-          onClose={() => setShowSketchEditor(false)}
+          onClose={(sketch) => {
+            const target = componentsRef.current.find((c) => c.id === sketchTargetId);
+            const saved = typeof target?.properties.sketch === 'string' ? target.properties.sketch : '';
+            // Keep edits: the sketch belongs to the part (saved with the circuit).
+            if (target && sketch !== saved && sketch.trim()) setPartProperties(target.id, { sketch });
+            setSketchTargetId(null);
+          }}
         />
+      )}
+      {confirm && (
+        <ConfirmDialog title={confirm.title} message={confirm.message} buttons={confirm.buttons} onCancel={confirm.onCancel} />
       )}
       {contextMenu && (() => {
         const items: { label: string; shortcut?: string; onClick: () => void; danger?: boolean }[] = [];
         if (contextMenu.componentId) {
-          const comp = components.find((c) => c.id === contextMenu.componentId);
+          const compId = contextMenu.componentId;
+          const comp = components.find((c) => c.id === compId);
           if (comp && comp.type !== 'power') {
-            items.push({ label: 'Rotate', shortcut: 'R', onClick: () => {
-              setComponents((prev) => prev.map((c) => c.id === contextMenu.componentId ? { ...c, rotation: (c.rotation + 90) % 360 } : c));
-            }});
+            items.push({ label: 'Rotate', shortcut: 'R', onClick: () => rotateComponents([compId], 90) });
+          }
+          if (comp?.type === 'led') {
+            items.push({ label: 'Flip polarity', onClick: () => rotateComponents([compId], 180) });
           }
           items.push({ label: 'Copy', shortcut: 'Ctrl+C', onClick: () => {
-            if (comp) clipboard.current = { ...comp };
+            if (comp) clipboard.current = { ...comp, properties: { ...comp.properties } };
           }});
-          items.push({ label: 'Delete', shortcut: 'Del', danger: true, onClick: () => {
-            if (contextMenu.componentId) handleDeleteComponent(contextMenu.componentId);
-          }});
+          items.push({ label: 'Delete', shortcut: 'Del', danger: true, onClick: () => handleDeleteComponent(compId) });
         } else if (contextMenu.wireId) {
-          items.push({ label: 'Delete Wire', shortcut: 'Del', danger: true, onClick: () => {
-            if (contextMenu.wireId) handleDeleteWire(contextMenu.wireId);
-          }});
+          const wireId = contextMenu.wireId;
+          items.push({ label: 'Delete Wire', shortcut: 'Del', danger: true, onClick: () => handleDeleteWire(wireId) });
         }
         if (items.length === 0) return null;
         return <ContextMenu x={contextMenu.x} y={contextMenu.y} items={items} onClose={() => setContextMenu(null)} />;
       })()}
+      <ToastList toasts={toasts.toasts} onDismiss={toasts.dismiss} />
     </div>
   );
 }

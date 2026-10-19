@@ -1,7 +1,9 @@
-import { useRef, useCallback, useMemo, useState } from 'react';
+import { useRef, useCallback, useMemo, useState, useEffect } from 'react';
 import { PlacedComponent, Wire, Point } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
 import { formatValue, formatVoltage, formatCurrent } from '../utils/format';
+import { shortcutsBlocked } from './modalStack';
+import { resistorBands, getWarning, ledBrightness as ledBrightnessOf } from './partVisuals';
 import {
   GRID_W, GRID_H, TOTAL_ROWS, BOARD_TOTAL_COLS,
   BOARD_PIXEL_WIDTH, BOARD_PIXEL_HEIGHT,
@@ -26,7 +28,8 @@ interface BreadboardProps {
   onDropComponent: (type: string, position: Point) => void;
   onMoveComponent: (id: string, position: Point) => void;
   onMoveSelection: (moves: { id: string; position: Point }[]) => void;
-  onMoveEnd: () => void;
+  /** Drag finished. `moves` are the final positions (null: nothing to commit). */
+  onMoveEnd: (moves: { id: string; position: Point }[] | null) => void;
   onStartWire: (componentId: string, pinId: string) => void;
   onEndWire: (componentId: string, pinId: string) => void;
   wiringFrom: { componentId: string; pinId: string } | null;
@@ -39,6 +42,8 @@ interface BreadboardProps {
   wireCurrents: Map<string, number>;
   pinHoleVoltages: Map<string, number>;
   onContextMenu?: (e: React.MouseEvent, componentId?: string, wireId?: string) => void;
+  /** Change this number to zoom to fit the circuit (after a load). */
+  fitRequest?: number;
 }
 
 /**
@@ -155,7 +160,7 @@ function rotatedSide(side: 'left' | 'right' | 'top' | 'bottom', rotation: number
   return sides[(idx + steps) % 4];
 }
 
-function getPinPosition(comp: PlacedComponent, pinId: string): Point | null {
+export function getPinPosition(comp: PlacedComponent, pinId: string): Point | null {
   const def = COMPONENT_DEFINITIONS[comp.type];
   if (!def) return null;
   const pin = def.pins.find((p) => p.id === pinId);
@@ -470,6 +475,64 @@ function pointsToPathD(rawPoints: Point[]): string {
   return d;
 }
 
+/** Smallest and largest zoom, in screen pixels per board unit. */
+const MIN_SCALE = 0.25;
+const MAX_SCALE = 12;
+/** Pixels the pointer must travel before a press becomes a drag. */
+const DRAG_THRESHOLD = 3;
+
+type DragState =
+  | {
+      kind: 'parts';
+      ids: string[];
+      draggedId: string;
+      offsetX: number;
+      offsetY: number;
+      type: string;
+      rotation: number;
+      originPositions: Record<string, Point>;
+      startClient: Point;
+      moved: boolean;
+      /** Pressed a member of a multi-selection without Ctrl: a click (no drag) selects just this part. */
+      collapseToId: string | null;
+      lastMoves: { id: string; position: Point }[] | null;
+    }
+  | {
+      kind: 'pan';
+      startClient: Point;
+      startPan: Point;
+      moved: boolean;
+      /** Released without moving: treat as a click on the background. */
+      clickClears: boolean;
+    };
+
+/** Bounding box of the circuit (parts and the board holes wires use), in board units. */
+function circuitBounds(components: PlacedComponent[], wires: Wire[]): Rect | null {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const add = (x: number, y: number) => {
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  };
+  for (const c of components) {
+    const r = getComponentRect(c);
+    if (r.w === 0 && r.h === 0) continue;
+    add(r.x, r.y);
+    add(r.x + r.w, r.y + r.h);
+  }
+  for (const w of wires) {
+    for (const ep of [w.from, w.to]) {
+      if (ep.componentId !== 'board') continue;
+      const [c, r] = ep.pinId.split(',').map(Number);
+      if (Number.isFinite(c) && Number.isFinite(r)) {
+        const p = gridToPixel(c, r);
+        add(p.x, p.y);
+      }
+    }
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
 export default function Breadboard({
   components,
   wires,
@@ -490,28 +553,26 @@ export default function Breadboard({
   wireCurrents,
   pinHoleVoltages,
   onContextMenu,
+  fitRequest = 0,
 }: BreadboardProps) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const dragRef = useRef<{
-    ids: string[];
-    draggedId: string;
-    offsetX: number;
-    offsetY: number;
-    type: string;
-    rotation: number;
-    originPositions: Record<string, Point>;
-  } | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const lastPointerId = useRef<number | null>(null);
   const [mousePos, setMousePos] = useState<Point | null>(null);
   const [hoveredHole, setHoveredHole] = useState<string | null>(null); // "col,row"
 
-  // Zoom and pan state
-  const [zoom, setZoom] = useState(1);
-  const [panOffset, setPanOffset] = useState<Point>({ x: 0, y: 0 });
-  const isPanning = useRef(false);
-  const panStart = useRef<Point>({ x: 0, y: 0 });
-  const panOffsetStart = useRef<Point>({ x: 0, y: 0 });
+  // Viewport: `scale` is screen pixels per board unit; `pan` is the board
+  // point at the top-left corner. The viewBox matches the element's aspect
+  // ratio, so there's no letterboxing and the whole canvas is used.
+  const [viewSize, setViewSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const [scale, setScale] = useState(1);
+  const [pan, setPan] = useState<Point>({ x: 0, y: 0 });
+  const viewRef = useRef({ scale: 1, pan: { x: 0, y: 0 }, size: { w: 0, h: 0 } });
+  viewRef.current = { scale, pan, size: viewSize };
   const componentsRef = useRef(components);
   componentsRef.current = components;
+  const wiresRef = useRef(wires);
+  wiresRef.current = wires;
 
   // Pin group data for hover highlighting
   const pinGroups = useMemo(() => buildPinGroups(), []);
@@ -524,11 +585,82 @@ export default function Breadboard({
     return m;
   }, [pinGroups]);
 
+  // Track the element's size.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const measure = () => {
+      const r = svg.getBoundingClientRect();
+      setViewSize((prev) => (Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5 ? prev : { w: r.width, h: r.height }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(svg);
+    return () => ro.disconnect();
+  }, []);
+
   const viewBox = useMemo(() => {
-    const vw = TOTAL_PIXEL_WIDTH / zoom;
-    const vh = BOARD_PIXEL_HEIGHT / zoom;
-    return `${panOffset.x} ${panOffset.y} ${vw} ${vh}`;
-  }, [zoom, panOffset]);
+    const w = viewSize.w > 0 ? viewSize.w / scale : TOTAL_PIXEL_WIDTH;
+    const h = viewSize.h > 0 ? viewSize.h / scale : BOARD_PIXEL_HEIGHT;
+    return `${pan.x} ${pan.y} ${w} ${h}`;
+  }, [scale, pan, viewSize]);
+
+  /** Show a board rectangle as large as fits, centred. */
+  const showRect = useCallback((r: Rect, maxScale = MAX_SCALE) => {
+    const { w: cw, h: ch } = viewRef.current.size;
+    if (cw <= 0 || ch <= 0) return;
+    const s = Math.max(MIN_SCALE, Math.min(maxScale, cw / Math.max(r.w, 1), ch / Math.max(r.h, 1)));
+    setScale(s);
+    setPan({ x: r.x + r.w / 2 - cw / s / 2, y: r.y + r.h / 2 - ch / s / 2 });
+  }, []);
+
+  const fitBoard = useCallback(() => {
+    showRect({ x: -6, y: -14, w: TOTAL_PIXEL_WIDTH + 12, h: BOARD_PIXEL_HEIGHT + 20 });
+  }, [showRect]);
+
+  /** Zoom to the circuit with a margin of two holes; the whole board when empty. */
+  const fitCircuit = useCallback(() => {
+    const b = circuitBounds(componentsRef.current, wiresRef.current);
+    if (!b) { fitBoard(); return; }
+    const mx = GRID_W * 2, my = GRID_H * 2;
+    // Don't zoom in so far that a single part fills the screen.
+    showRect({ x: b.x - mx, y: b.y - my, w: b.w + 2 * mx, h: b.h + 2 * my }, 5);
+  }, [fitBoard, showRect]);
+
+  /** Zoom by `factor` keeping the board point under (clientX, clientY) fixed. */
+  const zoomAt = useCallback((factor: number, clientX?: number, clientY?: number) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const { scale: s, pan: p, size } = viewRef.current;
+    const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, s * factor));
+    if (next === s) return;
+    const rect = svg.getBoundingClientRect();
+    const sx = clientX === undefined ? size.w / 2 : clientX - rect.left;
+    const sy = clientY === undefined ? size.h / 2 : clientY - rect.top;
+    // Board point under the cursor: p + screen / s. Keep it under the cursor.
+    const bx = p.x + sx / s;
+    const by = p.y + sy / s;
+    setScale(next);
+    setPan({ x: bx - sx / next, y: by - sy / next });
+  }, []);
+
+  const setZoomCentered = useCallback((target: number) => {
+    zoomAt(target / viewRef.current.scale);
+  }, [zoomAt]);
+
+  // Fit when asked (circuit loaded, demo, restore) and once the size is known.
+  const fittedOnce = useRef(false);
+  useEffect(() => {
+    if (viewSize.w <= 0 || viewSize.h <= 0) return;
+    fittedOnce.current = true;
+    fitCircuit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitRequest]);
+  useEffect(() => {
+    if (viewSize.w <= 0 || viewSize.h <= 0 || fittedOnce.current) return;
+    fittedOnce.current = true;
+    fitCircuit();
+  }, [viewSize, fitCircuit]);
 
   // Resolve a wire endpoint to pixel coordinates
   function getEndpointPos(endpoint: { componentId: string; pinId: string }): Point | null {
@@ -568,6 +700,7 @@ export default function Breadboard({
     }
 
     return results;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wires, components]);
 
   // Compute preview wire path while wiring
@@ -586,21 +719,23 @@ export default function Breadboard({
       []
     );
     return pointsToPathD(points);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wiringFrom, mousePos, components]);
 
-  const getSVGCoords = useCallback((e: React.MouseEvent): Point => {
-    const svg = svgRef.current!;
-    const rect = svg.getBoundingClientRect();
-    const vw = TOTAL_PIXEL_WIDTH / zoom;
-    const vh = BOARD_PIXEL_HEIGHT / zoom;
-    return {
-      x: panOffset.x + (e.clientX - rect.left) / rect.width * vw,
-      y: panOffset.y + (e.clientY - rect.top) / rect.height * vh,
-    };
-  }, [zoom, panOffset]);
+  /**
+   * Screen (client) coordinates to board coordinates. Uses the SVG's own
+   * screen transform, so it is right whatever the viewBox, zoom or layout.
+   */
+  const clientToBoard = useCallback((clientX: number, clientY: number): Point => {
+    const svg = svgRef.current;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return { x: clientX, y: clientY };
+    const pt = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+    return { x: pt.x, y: pt.y };
+  }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
+    if (e.dataTransfer.types.includes('componenttype')) e.preventDefault();
   }, []);
 
   const handleDrop = useCallback(
@@ -608,37 +743,140 @@ export default function Breadboard({
       e.preventDefault();
       const type = e.dataTransfer.getData('componentType');
       if (!type) return;
-      const svg = svgRef.current!;
-      const rect = svg.getBoundingClientRect();
-      const vw = TOTAL_PIXEL_WIDTH / zoom;
-      const vh = BOARD_PIXEL_HEIGHT / zoom;
-      const svgX = panOffset.x + (e.clientX - rect.left) / rect.width * vw;
-      const svgY = panOffset.y + (e.clientY - rect.top) / rect.height * vh;
-      const pos = snapComponentToGrid(svgX, svgY, type, 0);
+      const def = COMPONENT_DEFINITIONS[type];
+      const p = clientToBoard(e.clientX, e.clientY);
+      // Drop with the part centred on the cursor.
+      const cx = def ? p.x - (def.width * GRID_W) / 2 : p.x;
+      const cy = def ? p.y - (def.height * GRID_H) / 2 : p.y;
+      // Power supplies live in the supply strip on the left.
+      const pos = type === 'power'
+        ? { x: 0, y: Math.max(0, Math.round(cy / GRID_H) * GRID_H) }
+        : snapComponentToGrid(cx, cy, type, 0);
       if (!isValidPlacement(type, pos, 0)) return;
       onDropComponent(type, pos);
     },
-    [onDropComponent, zoom, panOffset]
+    [onDropComponent, clientToBoard]
   );
+
+  // ---- Dragging and panning: window-level listeners so a release outside
+  // the board (or the window) always ends the gesture. ----
+
+  const endDrag = useCallback((commit: boolean) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    const svg = svgRef.current;
+    if (svg && lastPointerId.current !== null) {
+      try { if (svg.hasPointerCapture(lastPointerId.current)) svg.releasePointerCapture(lastPointerId.current); } catch { /* already released */ }
+    }
+    if (!d) return;
+    if (d.kind === 'parts') {
+      if (d.moved) {
+        onMoveEnd(commit ? d.lastMoves : null);
+      } else if (d.collapseToId) {
+        onSelectComponent(d.collapseToId);
+      }
+    } else if (d.kind === 'pan' && !d.moved && d.clickClears) {
+      onSelectComponent(null);
+      onSelectWire(null);
+    }
+  }, [onMoveEnd, onSelectComponent, onSelectWire]);
+
+  const handleWindowMove = useCallback((e: MouseEvent) => {
+    const d = dragRef.current;
+    if (!d) return;
+    // The button was released somewhere we didn't hear about.
+    if (e.buttons === 0) { endDrag(true); return; }
+    const dist = Math.hypot(e.clientX - d.startClient.x, e.clientY - d.startClient.y);
+    if (!d.moved && dist < DRAG_THRESHOLD) return;
+    d.moved = true;
+
+    if (d.kind === 'pan') {
+      const s = viewRef.current.scale;
+      setPan({
+        x: d.startPan.x - (e.clientX - d.startClient.x) / s,
+        y: d.startPan.y - (e.clientY - d.startClient.y) / s,
+      });
+      return;
+    }
+
+    const coords = clientToBoard(e.clientX, e.clientY);
+    const pos = snapComponentToGrid(coords.x - d.offsetX, coords.y - d.offsetY, d.type, d.rotation);
+    if (!isValidPlacement(d.type, pos, d.rotation)) return;
+    const baseOrigin = d.originPositions[d.draggedId];
+    const delta = { x: pos.x - baseOrigin.x, y: pos.y - baseOrigin.y };
+    const groupIds = new Set(d.ids);
+    const moves = d.ids
+      .filter((id) => d.originPositions[id])
+      .map((id) => ({
+        id,
+        position: { x: d.originPositions[id].x + delta.x, y: d.originPositions[id].y + delta.y },
+      }));
+    const valid = moves.every(({ id, position }) => {
+      const comp = componentsRef.current.find((c) => c.id === id);
+      if (!comp) return false;
+      if (!isValidPlacement(comp.type, position, comp.rotation)) return false;
+      const candidate = { ...comp, position };
+      return !componentsRef.current.some(
+        (other) => !groupIds.has(other.id) && componentsOverlap(candidate, other)
+      );
+    });
+    if (!valid) return;
+    d.lastMoves = moves;
+    if (moves.length === 1) onMoveComponent(moves[0].id, moves[0].position);
+    else onMoveSelection(moves);
+  }, [clientToBoard, endDrag, onMoveComponent, onMoveSelection]);
+
+  useEffect(() => {
+    const up = () => endDrag(true);
+    const cancel = () => endDrag(true);
+    window.addEventListener('mousemove', handleWindowMove);
+    window.addEventListener('mouseup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMove);
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+    };
+  }, [handleWindowMove, endDrag]);
+
+  /** Capture the pointer for the gesture that's starting, so the board keeps getting its events. */
+  const capturePointer = useCallback(() => {
+    const svg = svgRef.current;
+    if (svg && lastPointerId.current !== null) {
+      try { svg.setPointerCapture(lastPointerId.current); } catch { /* pointer already gone */ }
+    }
+  }, []);
 
   const handleComponentMouseDown = useCallback(
     (e: React.MouseEvent, compId: string) => {
+      if (e.button !== 0) return;
       // Don't select/drag if we're wiring
       if (wiringFrom) return;
       const isSelected = selectedComponentIds.includes(compId);
       const additive = e.ctrlKey || e.metaKey;
-      const nextSelectedIds = additive
-        ? isSelected
+      let nextSelectedIds: string[];
+      let collapseToId: string | null = null;
+      if (additive) {
+        nextSelectedIds = isSelected
           ? selectedComponentIds.filter((id) => id !== compId)
-          : [...selectedComponentIds, compId]
-        : [compId];
-
-      onSelectComponent(compId, additive);
+          : [...selectedComponentIds, compId];
+        onSelectComponent(compId, true);
+      } else if (isSelected && selectedComponentIds.length > 1) {
+        // Pressing a member of a multi-selection keeps the group so it can
+        // be dragged together; a plain click (no drag) selects just this one.
+        nextSelectedIds = selectedComponentIds;
+        collapseToId = compId;
+      } else {
+        nextSelectedIds = [compId];
+        onSelectComponent(compId, false);
+      }
       onSelectWire(null);
 
       if (!nextSelectedIds.includes(compId)) return;
 
-      const coords = getSVGCoords(e);
+      const coords = clientToBoard(e.clientX, e.clientY);
       const comp = components.find((c) => c.id === compId);
       if (comp) {
         const originPositions: Record<string, Point> = {};
@@ -647,6 +885,7 @@ export default function Breadboard({
           if (selected) originPositions[id] = { ...selected.position };
         });
         dragRef.current = {
+          kind: 'parts',
           ids: nextSelectedIds,
           draggedId: compId,
           offsetX: coords.x - comp.position.x,
@@ -654,88 +893,23 @@ export default function Breadboard({
           type: comp.type,
           rotation: comp.rotation,
           originPositions,
+          startClient: { x: e.clientX, y: e.clientY },
+          moved: false,
+          collapseToId,
+          lastMoves: null,
         };
+        capturePointer();
       }
     },
-    [components, getSVGCoords, onSelectComponent, onSelectWire, wiringFrom, selectedComponentIds]
+    [components, clientToBoard, onSelectComponent, onSelectWire, wiringFrom, selectedComponentIds, capturePointer]
   );
 
-  const handleMouseMove = useCallback(
+  const handleSvgMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      // Handle panning
-      if (isPanning.current) {
-        const svg = svgRef.current!;
-        const rect = svg.getBoundingClientRect();
-        const vw = TOTAL_PIXEL_WIDTH / zoom;
-        const vh = BOARD_PIXEL_HEIGHT / zoom;
-        const dx = (e.clientX - panStart.current.x) / rect.width * vw;
-        const dy = (e.clientY - panStart.current.y) / rect.height * vh;
-        setPanOffset({
-          x: panOffsetStart.current.x - dx,
-          y: panOffsetStart.current.y - dy,
-        });
-        return;
-      }
-
-      const coords = getSVGCoords(e);
-      if (wiringFrom) {
-        setMousePos(coords);
-      }
-      if (dragRef.current) {
-        const ref = dragRef.current;
-        const pos = snapComponentToGrid(
-          coords.x - ref.offsetX,
-          coords.y - ref.offsetY,
-          ref.type,
-          ref.rotation,
-        );
-        if (!isValidPlacement(ref.type, pos, ref.rotation)) return;
-        const baseOrigin = ref.originPositions[ref.draggedId];
-        const delta = {
-          x: pos.x - baseOrigin.x,
-          y: pos.y - baseOrigin.y,
-        };
-
-        const groupIds = new Set(ref.ids);
-        const moves = ref.ids.map((id) => {
-          const origin = ref.originPositions[id];
-          return {
-            id,
-            position: {
-              x: origin.x + delta.x,
-              y: origin.y + delta.y,
-            },
-          };
-        });
-
-        const valid = moves.every(({ id, position }) => {
-          const comp = componentsRef.current.find((c) => c.id === id);
-          if (!comp) return false;
-          if (!isValidPlacement(comp.type, position, comp.rotation)) return false;
-          const candidate = { ...comp, position };
-          return !componentsRef.current.some(
-            (other) => !groupIds.has(other.id) && componentsOverlap(candidate, other)
-          );
-        });
-
-        if (!valid) return;
-        if (moves.length === 1) {
-          onMoveComponent(moves[0].id, moves[0].position);
-        } else {
-          onMoveSelection(moves);
-        }
-      }
+      if (wiringFrom) setMousePos(clientToBoard(e.clientX, e.clientY));
     },
-    [getSVGCoords, onMoveComponent, onMoveSelection, wiringFrom, zoom]
+    [clientToBoard, wiringFrom]
   );
-
-  const handleMouseUp = useCallback(() => {
-    if (dragRef.current) {
-      onMoveEnd();
-    }
-    dragRef.current = null;
-    isPanning.current = false;
-  }, [onMoveEnd]);
 
   const handlePinMouseDown = useCallback(
     (componentId: string, pinId: string) => {
@@ -762,62 +936,69 @@ export default function Breadboard({
   );
 
   const handleBoardMouseDown = useCallback((e: React.MouseEvent) => {
-    // Clear any lingering drag state
-    dragRef.current = null;
-
-    // Ctrl+click to pan
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      isPanning.current = true;
-      panStart.current = { x: e.clientX, y: e.clientY };
-      panOffsetStart.current = { ...panOffset };
-      return;
-    }
+    // Drop any lingering gesture first.
+    if (dragRef.current) endDrag(true);
+    if (e.button !== 0 && e.button !== 1) return;
 
     const isBackground = e.target === svgRef.current ||
       ((e.target as SVGElement).tagName === 'rect' && !(e.target as SVGElement).closest('.component'));
-    if (!isBackground) return;
 
-    if (wiringFrom) {
+    // Ctrl+drag or middle-drag pans anywhere; a plain drag on the background pans too.
+    const forcePan = e.ctrlKey || e.metaKey || e.button === 1;
+    if (!forcePan && !isBackground) return;
+
+    if (isBackground && wiringFrom && !forcePan) {
       onStartWire('', '');
       setMousePos(null);
       return;
     }
 
-    onSelectComponent(null);
-    onSelectWire(null);
-  }, [onSelectComponent, onSelectWire, wiringFrom, onStartWire, panOffset]);
-
-  const handleWheel = useCallback((e: React.WheelEvent) => {
+    // preventDefault stops text selection but also keeps focus where it was;
+    // blur a field being edited so its value is committed.
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active !== document.body && typeof active.blur === 'function') active.blur();
     e.preventDefault();
-    const svg = svgRef.current!;
-    const rect = svg.getBoundingClientRect();
+    dragRef.current = {
+      kind: 'pan',
+      startClient: { x: e.clientX, y: e.clientY },
+      startPan: { ...viewRef.current.pan },
+      moved: false,
+      clickClears: isBackground && !forcePan,
+    };
+    capturePointer();
+  }, [wiringFrom, onStartWire, endDrag, capturePointer]);
 
-    // Mouse position in SVG coords before zoom
-    const vw = TOTAL_PIXEL_WIDTH / zoom;
-    const vh = BOARD_PIXEL_HEIGHT / zoom;
-    const mx = panOffset.x + (e.clientX - rect.left) / rect.width * vw;
-    const my = panOffset.y + (e.clientY - rect.top) / rect.height * vh;
+  // Wheel zoom: a native, non-passive listener (React's onWheel is passive,
+  // so preventDefault there only logs errors).
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = Math.pow(1.0015, -e.deltaY * (e.deltaMode === 1 ? 33 : 1));
+      zoomAt(Math.max(0.5, Math.min(2, factor)), e.clientX, e.clientY);
+    };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, [zoomAt]);
 
-    // Zoom in/out
-    const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    const newZoom = Math.max(0.3, Math.min(10, zoom * zoomFactor));
-
-    // Adjust pan so the point under the cursor stays fixed
-    const newVw = TOTAL_PIXEL_WIDTH / newZoom;
-    const newVh = BOARD_PIXEL_HEIGHT / newZoom;
-    const cursorFracX = (e.clientX - rect.left) / rect.width;
-    const cursorFracY = (e.clientY - rect.top) / rect.height;
-
-    setPanOffset({
-      x: mx - cursorFracX * newVw,
-      y: my - cursorFracY * newVh,
-    });
-    setZoom(newZoom);
-  }, [zoom, panOffset]);
+  // Keyboard zoom: + / − / 0 (100 %) / F (fit). Ctrl+± stays the window zoom.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (shortcutsBlocked(e, !!document.querySelector('.modal-overlay'))) return;
+      if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomAt(1.25); }
+      else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomAt(1 / 1.25); }
+      else if (e.key === '0') { e.preventDefault(); setZoomCentered(1); }
+      else if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fitCircuit(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [zoomAt, setZoomCentered, fitCircuit]);
 
   const handleBoardPinMouseDown = useCallback(
     (col: number, row: number, e: React.MouseEvent) => {
+      if (e.button !== 0) return;
       e.stopPropagation();
       const boardPinId = `${col},${row}`;
       if (!wiringFrom) {
@@ -830,6 +1011,9 @@ export default function Breadboard({
     [wiringFrom, onStartWire, onEndWire]
   );
 
+  /** Board units that show as `px` screen pixels at the current zoom (for readable labels). */
+  const screenPx = (px: number) => px / scale;
+
   // Compute highlighted holes for the hovered strip + coordinate label
   const highlightedHoles = useMemo(() => {
     if (!hoveredHole) return null;
@@ -841,7 +1025,9 @@ export default function Breadboard({
     const hPos = gridToPixel(hc, hr);
     const holeVoltage = simRunning && pinHoleVoltages ? (pinHoleVoltages.get(hoveredHole) ?? 0) : 0;
     const voltageStr = Math.abs(holeVoltage) > 0.01 ? `  ${holeVoltage.toFixed(2)}V` : '';
-    const labelText = `(${hc},${hr})${voltageStr}`;
+    const labelText = `col ${hc}, row ${hr}${voltageStr}`;
+    // Readable at any zoom: sized in screen pixels.
+    const fs = screenPx(11);
     const elements = pins.map(({ col, row }) => {
       const { x, y } = gridToPixel(col, row);
       return (
@@ -858,20 +1044,21 @@ export default function Breadboard({
     elements.push(
       <g key="hover-label" pointerEvents="none">
         <rect
-          x={hPos.x + 5} y={hPos.y - 10}
-          width={labelText.length * 3.2 + 4} height={8}
-          rx={2} fill="rgba(30,41,59,0.9)" stroke="#475569" strokeWidth={0.4}
+          x={hPos.x + 5} y={hPos.y - 5 - fs * 1.5}
+          width={labelText.length * fs * 0.6 + fs * 0.8} height={fs * 1.5}
+          rx={fs * 0.3} fill="rgba(30,41,59,0.92)" stroke="#475569" strokeWidth={fs * 0.08}
         />
         <text
-          x={hPos.x + 7} y={hPos.y - 4}
-          fill="#e2e8f0" fontSize={4.5} fontWeight="500"
+          x={hPos.x + 5 + fs * 0.4} y={hPos.y - 5 - fs * 0.42}
+          fill="#e2e8f0" fontSize={fs} fontWeight="500"
         >
           {labelText}
         </text>
       </g>
     );
     return elements;
-  }, [hoveredHole, pinLookup, pinGroupMap, simRunning, pinHoleVoltages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hoveredHole, pinLookup, pinGroupMap, simRunning, pinHoleVoltages, scale]);
 
   // Build pin hole elements for all breadboards
   const pinHoles = useMemo(() => {
@@ -999,16 +1186,20 @@ export default function Breadboard({
   }, []);
 
   return (
+    <>
     <svg
       ref={svgRef}
       className="breadboard-svg"
       viewBox={viewBox}
+      preserveAspectRatio="xMinYMin meet"
       onDragOver={handleDragOver}
       onDrop={handleDrop}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onWheel={handleWheel}
+      onPointerDown={(e) => { lastPointerId.current = e.pointerId; }}
+      onMouseMove={handleSvgMouseMove}
       onMouseDown={handleBoardMouseDown}
+      onMouseLeave={() => { if (wiringFrom) setMousePos(null); }}
+      role="application"
+      aria-label="Breadboard"
     >
       {/* Supply area background */}
       <rect x={0} y={0} width={SUPPLY_WIDTH} height={BOARD_PIXEL_HEIGHT} fill="#0b1120" rx={8} />
@@ -1143,8 +1334,9 @@ export default function Breadboard({
         const ledColor = comp.type === 'led'
           ? ledColorMap[comp.properties.color as string] || def.color
           : def.color;
-        const ledBrightness = comp.type === 'led' ? Number(comp.state?.brightness ?? 0) : 0;
+        const ledBrightness = comp.type === 'led' ? ledBrightnessOf(comp) : 0;
         const isLedOn = ledBrightness > 0;
+        const warning = getWarning(comp);
         const isSwitchClosed = comp.type === 'switch' && comp.state?.closed;
         const isTimerHigh = comp.type === 'timer' && comp.state?.outputHigh;
 
@@ -1224,22 +1416,20 @@ export default function Breadboard({
                     strokeWidth={1}
                     rx={3}
                   />
-                  {/* Color bands */}
-                  {isVert ? (
-                    <>
-                      <line x1={bx + 2} y1={by + bodyH * 0.2} x2={bx + bodyW - 2} y2={by + bodyH * 0.2} stroke="#5c4a0e" strokeWidth={2} />
-                      <line x1={bx + 2} y1={by + bodyH * 0.4} x2={bx + bodyW - 2} y2={by + bodyH * 0.4} stroke="#1a1a1a" strokeWidth={2} />
-                      <line x1={bx + 2} y1={by + bodyH * 0.6} x2={bx + bodyW - 2} y2={by + bodyH * 0.6} stroke="#b91c1c" strokeWidth={2} />
-                      <line x1={bx + 2} y1={by + bodyH * 0.8} x2={bx + bodyW - 2} y2={by + bodyH * 0.8} stroke="#d4af37" strokeWidth={1.5} />
-                    </>
-                  ) : (
-                    <>
-                      <line x1={bx + bodyW * 0.2} y1={by + 2} x2={bx + bodyW * 0.2} y2={by + bodyH - 2} stroke="#5c4a0e" strokeWidth={2} />
-                      <line x1={bx + bodyW * 0.4} y1={by + 2} x2={bx + bodyW * 0.4} y2={by + bodyH - 2} stroke="#1a1a1a" strokeWidth={2} />
-                      <line x1={bx + bodyW * 0.6} y1={by + 2} x2={bx + bodyW * 0.6} y2={by + bodyH - 2} stroke="#b91c1c" strokeWidth={2} />
-                      <line x1={bx + bodyW * 0.8} y1={by + 2} x2={bx + bodyW * 0.8} y2={by + bodyH - 2} stroke="#d4af37" strokeWidth={1.5} />
-                    </>
-                  )}
+                  {/* Colour bands, computed from the value (4.7 kΩ = yellow violet red gold) */}
+                  {(resistorBands(Number(comp.properties.resistance ?? 220)) ?? []).map((band, i) => {
+                    const f = [0.2, 0.38, 0.56, 0.82][i];
+                    const sw = i === 3 ? 1.5 : 2;
+                    return isVert ? (
+                      <line key={i} x1={bx + 2} y1={by + bodyH * f} x2={bx + bodyW - 2} y2={by + bodyH * f} stroke={band.color} strokeWidth={sw}>
+                        <title>{band.name}</title>
+                      </line>
+                    ) : (
+                      <line key={i} x1={bx + bodyW * f} y1={by + 2} x2={bx + bodyW * f} y2={by + bodyH - 2} stroke={band.color} strokeWidth={sw}>
+                        <title>{band.name}</title>
+                      </line>
+                    );
+                  })}
                 </>
               );
             })() : comp.type === 'capacitor' ? (() => {
@@ -1284,19 +1474,39 @@ export default function Breadboard({
                   >+</text>
                 </>
               );
-            })() : comp.type === 'led' ? (
-              <>
-                <circle
-                  cx={w / 2}
-                  cy={h / 2}
-                  r={w / 2 - 1}
-                  fill={isLedOn ? ledColor : '#333'}
-                  stroke={ledColor}
-                  strokeWidth={1.5}
-                  opacity={isLedOn ? 1 : 0.4}
-                />
-              </>
-            ) : comp.type === 'potentiometer' ? (() => {
+            })() : comp.type === 'led' ? (() => {
+              // Brightness 0..1 sets the glow. The flat side of the rim marks
+              // the cathode (−), as on a real 5 mm LED.
+              const r = w / 2 - 1;
+              const cx = w / 2;
+              const cy = h / 2;
+              const cathodeSide = rotatedSide('bottom', comp.rotation);
+              const flat = r * 0.72;
+              const [fx1, fy1, fx2, fy2] =
+                cathodeSide === 'bottom' ? [cx - flat, cy + flat, cx + flat, cy + flat]
+                : cathodeSide === 'top' ? [cx - flat, cy - flat, cx + flat, cy - flat]
+                : cathodeSide === 'left' ? [cx - flat, cy - flat, cx - flat, cy + flat]
+                : [cx + flat, cy - flat, cx + flat, cy + flat];
+              return (
+                <>
+                  {isLedOn && (
+                    <circle cx={cx} cy={cy} r={r + 2 + 6 * ledBrightness} fill={ledColor} opacity={0.15 + 0.4 * ledBrightness} pointerEvents="none" />
+                  )}
+                  <circle
+                    cx={cx}
+                    cy={cy}
+                    r={r}
+                    fill={isLedOn ? ledColor : '#333'}
+                    stroke={ledColor}
+                    strokeWidth={1.5}
+                    opacity={isLedOn ? 0.45 + 0.55 * ledBrightness : 0.4}
+                  />
+                  <line x1={fx1} y1={fy1} x2={fx2} y2={fy2} stroke="#0f172a" strokeWidth={2.2} strokeLinecap="round" pointerEvents="none">
+                    <title>Flat side = cathode (−)</title>
+                  </line>
+                </>
+              );
+            })() : comp.type === 'potentiometer' ? (() => {
               // Potentiometer: circular body with wiper arrow
               const cx = w / 2;
               const cy = h / 2;
@@ -1534,7 +1744,15 @@ export default function Breadboard({
             )}
 
             {/* Waveform icon on power supply */}
-            {comp.type === 'power' && (
+            {/* The symbol follows the mode: DC is the ⎓ sign (solid over dashed);
+                AC shows its waveform. */}
+            {comp.type === 'power' && (comp.properties.mode ?? 'DC') !== 'AC' && (
+              <g stroke="#4ade80" strokeWidth={1.5} strokeLinecap="round" opacity={0.6} pointerEvents="none">
+                <line x1={6} y1={h - 13} x2={38} y2={h - 13} />
+                <line x1={6} y1={h - 7} x2={38} y2={h - 7} strokeDasharray="5 4" />
+              </g>
+            )}
+            {comp.type === 'power' && comp.properties.mode === 'AC' && (
               <path
                 d={comp.properties.waveform === 'sine'
                   ? `M ${4} ${h - 10} Q ${10} ${h - 22} ${16} ${h - 10} Q ${22} ${h + 2} ${28} ${h - 10} Q ${34} ${h - 22} ${40} ${h - 10}`
@@ -1741,6 +1959,17 @@ export default function Breadboard({
                 </g>
               );
             })}
+
+            {/* Warning from the engine: badge on the part, message on hover
+                (and in the properties panel when selected). */}
+            {warning && (
+              <g className="part-warning" data-warning-code={warning.code}>
+                <title>{warning.message}</title>
+                <rect x={-2} y={-2} width={w + 4} height={h + 4} rx={4} fill="none" stroke="#f59e0b" strokeWidth={screenPx(1.5)} strokeDasharray={`${screenPx(4)} ${screenPx(2)}`} />
+                <circle cx={w} cy={0} r={screenPx(8)} fill="#f59e0b" stroke="#0f172a" strokeWidth={screenPx(1.5)} />
+                <text x={w} y={screenPx(4)} textAnchor="middle" fill="#0f172a" fontSize={screenPx(12)} fontWeight="800">!</text>
+              </g>
+            )}
           </g>
         );
       })}
@@ -1762,26 +1991,29 @@ export default function Breadboard({
         const iStr = formatCurrent(current);
         const label = iStr ? `${vStr} ${iStr}` : vStr;
 
+        // Readouts keep a constant, readable screen size (11 px) at any zoom.
+        const fs = screenPx(11);
         const rx = comp.position.x + w / 2;
-        const ry = comp.position.y + h + 7;
+        const ry = comp.position.y + h + 2 + fs;
+        const boxW = label.length * fs * 0.6 + fs * 0.8;
         return (
-          <g key={`readout-${comp.id}`} pointerEvents="none">
+          <g key={`readout-${comp.id}`} pointerEvents="none" className="sim-readout">
             <rect
-              x={rx - label.length * 1.6 - 2}
-              y={ry - 3.5}
-              width={label.length * 3.2 + 4}
-              height={5.5}
-              rx={2}
-              fill="rgba(255,255,255,0.85)"
+              x={rx - boxW / 2}
+              y={ry - fs * 1.05}
+              width={boxW}
+              height={fs * 1.4}
+              rx={fs * 0.3}
+              fill="rgba(255,255,255,0.9)"
               stroke="#cbd5e1"
-              strokeWidth={0.3}
+              strokeWidth={fs * 0.05}
             />
             <text
               x={rx}
               y={ry}
               textAnchor="middle"
               fill="#1e293b"
-              fontSize={4}
+              fontSize={fs}
               fontWeight="600"
             >
               {label}
@@ -1790,5 +2022,14 @@ export default function Breadboard({
         );
       })}
     </svg>
+    <div className="zoom-controls" role="group" aria-label="Zoom">
+      <button type="button" onClick={() => zoomAt(1 / 1.25)} aria-label="Zoom out" title="Zoom out (−)">−</button>
+      <span className="zoom-level" aria-live="polite">{Math.round(scale * 100)}%</span>
+      <button type="button" onClick={() => zoomAt(1.25)} aria-label="Zoom in" title="Zoom in (+)">+</button>
+      <button type="button" onClick={() => setZoomCentered(1)} title="Actual size: 1 screen pixel per board unit (0)">100%</button>
+      <button type="button" onClick={fitCircuit} title="Zoom to fit the circuit (F)">Fit</button>
+      <button type="button" onClick={fitBoard} title="Show the whole breadboard">Board</button>
+    </div>
+    </>
   );
 }

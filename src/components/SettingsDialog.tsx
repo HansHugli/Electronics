@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import Modal from './Modal';
 
 interface SettingsDialogProps {
   onClose: () => void;
@@ -42,9 +43,7 @@ export default function SettingsDialog({ onClose }: SettingsDialogProps) {
   };
 
   return (
-    <div className="modal-overlay">
-      <div className="modal settings-modal-wide">
-        <h2 className="modal-title">Settings</h2>
+    <Modal title="Settings" className="settings-modal-wide" onClose={onClose}>
 
         <div className="settings-section">
           <label className="settings-label">Data File Location</label>
@@ -100,7 +99,6 @@ export default function SettingsDialog({ onClose }: SettingsDialogProps) {
             Close
           </button>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
