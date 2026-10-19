@@ -1,517 +1,351 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { WebContents } from 'electron';
 import { ipcMain } from 'electron';
+import {
+  assistantTurn,
+  cancelledResultsTurn,
+  closeOpenToolUse,
+  Conversation,
+  STOPPED_TEXT,
+  toolResultsTurn,
+  ToolResultIn,
+  validateHistory,
+  withCacheBreakpoint,
+} from './chatHistory';
+import { ModelChoice } from './modelSelect';
+import { addUsage, calculateCost, emptyUsage, TokenUsage, usageFromApi } from './pricing';
+import { CIRCUIT_TOOLS, toolsForModel } from './chatTools';
 
 /**
- * Claude chat IPC module.
+ * Claude chat in the main process. The renderer never holds the API key.
  *
- * The renderer never holds the Anthropic API key. Chat messages flow:
- *   renderer → IPC → streamChat() → Anthropic API
- *                                       ↓ token deltas + tool_use
- *   renderer ← IPC events ← streamChat()
+ *   renderer → 'chat-send' → runChat() → Anthropic API (streamed)
+ *   renderer ← token / tool-call / notice / done / error events
  *
- * Tool-use loop:
- *   Claude returns tool_use blocks → main sends them to the renderer via
- *   'chat-stream-tool-call' → renderer executes them on circuit state and
- *   replies via 'chat-tool-result' → main feeds tool results back to
- *   Claude → Claude continues (may stream more text or more tool calls).
+ * Tool loop: tool_use blocks go to the renderer ('chat-stream-tool-calls'),
+ * which validates and executes them on the circuit and answers on
+ * 'chat-tool-result-<requestId>' (with a timeout). The full content blocks
+ * of every round are kept in the conversation, so history stays valid.
  */
 
-export type CircuitContextMode = 'always' | 'on-change' | 'never';
+export type { CircuitContextMode } from './config';
+export { CIRCUIT_TOOLS };
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
 }
 
-export interface StreamChatRequest {
+export const MAX_TOKENS = 16000;
+export const MAX_ROUNDS = 25;
+export const TOOL_RESULT_TIMEOUT_MS = 30_000;
+
+export interface RunChatRequest {
   apiKey: string;
-  model: string;
-  messages: ChatMessage[];
-  circuitContext: string;
+  choice: ModelChoice;
+  conversation: Conversation;
   componentCatalog: string;
   requestId: string;
+  /** Called once per user turn with usage summed over every round. */
+  onUsage: (model: string, usage: TokenUsage, cost: number | null, rounds: number) => void;
+  /** Used to check that tool results come from our own window. */
+  isTrustedSender: (event: Electron.IpcMainEvent) => boolean;
+  /** Test hook: inject a client. */
+  client?: Pick<Anthropic, 'messages'>;
 }
-
-/** A single circuit-manipulation action for the renderer to execute. */
-export interface CircuitAction {
-  tool: string;
-  input: Record<string, unknown>;
-}
-
-/** Result from the renderer after executing a circuit action. */
-export interface CircuitActionResult {
-  success: boolean;
-  message: string;
-  data?: Record<string, unknown>;
-}
-
-// ---- Tool Definitions ---- //
-
-const CIRCUIT_TOOLS: Anthropic.Tool[] = [
-  {
-    name: 'add_component',
-    description: `Add a component to the breadboard at a specific grid position.
-
-Grid coordinates:
-- col: 0-30 (breadboard column). Board 1 spans cols 0-14, board 2 spans cols 16-30. Col 15 is the gap between boards.
-  Within each board: cols 0-1 are power rails, cols 2-6 are left component area, col 7 is the center gap, cols 8-12 are right component area, cols 13-14 are power rails.
-  For board 2, add 16 to these values.
-- row: 0-49 (breadboard row, top to bottom)
-
-The "col" value is where the component's LEFT pins land. For width-1 components (resistors, LEDs, etc.), place them anywhere in the component area (cols 2-6 or 8-12).
-
-DIP chips (width=2) are automatically positioned to straddle the center gap. Just specify col=6 for board 1 or col=22 for board 2 — the system will place left pins on that column and right pins two columns over (skipping the gap). You MUST use col=6 for DIP chips on board 1 (not col=5 or col=7).
-
-Power supplies are special — use col=-4 and a row in the 0-10 range.
-
-Returns the component ID assigned to the new component.`,
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        type: {
-          type: 'string',
-          description: 'Component type ID from the catalog (e.g. "resistor", "led", "timer", "atmega328")',
-        },
-        col: {
-          type: 'number',
-          description: 'Grid column (0-30)',
-        },
-        row: {
-          type: 'number',
-          description: 'Grid row (0-49)',
-        },
-        properties: {
-          type: 'object',
-          description: 'Optional component properties (e.g. {"resistance": 1000} for a resistor, {"voltage": 5, "mode": "dc", "waveform": "square"} for power)',
-          additionalProperties: true,
-        },
-      },
-      required: ['type', 'col', 'row'],
-    },
-  },
-  {
-    name: 'add_wire',
-    description: `Connect two pins with a wire. Each endpoint is specified as either:
-- A component pin: { componentId: "comp_1", pinId: "anode" }
-- A bare breadboard hole: { componentId: "board", pinId: "col,row" } where col and row are grid coordinates
-
-Pin IDs vary by component type. Common examples:
-- Resistor: "lead1", "lead2"
-- LED: "anode", "cathode"
-- Capacitor: "pos", "neg"
-- Switch: "a", "b"
-- 555 Timer: "gnd", "trigger", "output", "reset", "control", "threshold", "discharge", "vcc"
-- Power supply: "pos", "neg"
-- ATmega328P: pin names like "pd0" through "pd7", "pb0" through "pb5", "pc0" through "pc5", "vcc", "gnd", etc.
-
-Use bare board holes to connect to power rails or to route through the breadboard's internal wiring.`,
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        from: {
-          type: 'object',
-          properties: {
-            componentId: { type: 'string' },
-            pinId: { type: 'string' },
-          },
-          required: ['componentId', 'pinId'],
-        },
-        to: {
-          type: 'object',
-          properties: {
-            componentId: { type: 'string' },
-            pinId: { type: 'string' },
-          },
-          required: ['componentId', 'pinId'],
-        },
-        color: {
-          type: 'string',
-          description: 'Optional wire color (e.g. "#e74c3c" for red, "#2ecc71" for green). Defaults to auto-cycling colors.',
-        },
-      },
-      required: ['from', 'to'],
-    },
-  },
-  {
-    name: 'remove_component',
-    description: 'Remove a component from the breadboard by its ID. Also removes all wires connected to it.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        componentId: {
-          type: 'string',
-          description: 'The component ID to remove (e.g. "comp_1")',
-        },
-      },
-      required: ['componentId'],
-    },
-  },
-  {
-    name: 'remove_wire',
-    description: 'Remove a wire by its ID.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        wireId: {
-          type: 'string',
-          description: 'The wire ID to remove (e.g. "wire_1")',
-        },
-      },
-      required: ['wireId'],
-    },
-  },
-  {
-    name: 'clear_circuit',
-    description: 'Remove all components and wires from the breadboard. Use this before building a new circuit from scratch.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'list_components',
-    description: 'List all components currently on the breadboard with their IDs, types, positions, and properties. Useful to check the current state before making changes.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'create_component_type',
-    description: `Create a new component type that doesn't exist in the catalog. Use this when the user asks for a component not in the catalog (e.g. a Geiger-Müller tube, a relay, a sensor, etc.). The new type is registered immediately and can then be placed with add_component.
-
-IMPORTANT: If the type ID already exists, this tool returns success with the existing type info — it does NOT create a duplicate. Always reuse existing type IDs when the same component is needed again. Use list_components first to check what custom types already exist on the board.
-
-The component is rendered as a DIP-style chip on the breadboard with labeled pins. It uses "passthrough" behavior (visual only — no simulation model), but the circuit can still be wired and demonstrated structurally.
-
-After creating a new type, immediately use add_component to place it on the board.`,
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        type: {
-          type: 'string',
-          description: 'Unique type ID for the new component (e.g. "geiger_tube", "relay_spdt"). Use lowercase with underscores.',
-        },
-        label: {
-          type: 'string',
-          description: 'Short display label for the chip body (e.g. "GM Tube", "Relay")',
-        },
-        description: {
-          type: 'string',
-          description: 'One-line description for the sidebar (e.g. "Geiger-Müller radiation detector tube")',
-        },
-        category: {
-          type: 'string',
-          enum: ['passive', 'active', 'input', 'output', 'measurement', 'power'],
-          description: 'Component category for the sidebar',
-        },
-        pins: {
-          type: 'array',
-          description: 'Pin definitions. For a DIP package, put half the pins on "left" and half on "right".',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string', description: 'Pin ID used in wiring (e.g. "anode", "clk", "vcc")' },
-              label: { type: 'string', description: 'Display label on the pin (e.g. "ANO", "CLK", "VCC")' },
-              side: { type: 'string', enum: ['left', 'right'], description: 'Which side of the chip' },
-              type: { type: 'string', enum: ['power', 'ground', 'input', 'output', 'bidirectional'], description: 'Pin type' },
-            },
-            required: ['id', 'label', 'side', 'type'],
-          },
-        },
-        color: {
-          type: 'string',
-          description: 'Chip body color as a hex string (e.g. "#4a4a4a"). Defaults to dark gray.',
-        },
-        properties: {
-          type: 'object',
-          description: 'Optional editable properties (e.g. {"voltage": {"label": "HV Output", "default": 400, "unit": "V"}})',
-          additionalProperties: true,
-        },
-      },
-      required: ['type', 'label', 'pins'],
-    },
-  },
-  {
-    name: 'delete_component_type',
-    description: 'Delete a custom (AI-created) component type. Built-in component types cannot be deleted. Also removes all placed instances of this component and their wires from the board.',
-    input_schema: {
-      type: 'object' as const,
-      properties: {
-        type: {
-          type: 'string',
-          description: 'The type ID of the custom component to delete (e.g. "geiger_tube")',
-        },
-      },
-      required: ['type'],
-    },
-  },
-];
 
 // ---- System Prompt ---- //
 
-const SYSTEM_PROMPT = `You are an electronics tutor and assistant embedded in the e101 visual circuit simulator. The user is building circuits by placing components on a virtual breadboard and wiring them together, then running a simulation to see what happens.
+const SYSTEM_PROMPT = `You are an electronics tutor and assistant embedded in the E101 visual circuit simulator. The user builds circuits by placing components on a virtual breadboard, wiring them, and running a simulation.
 
-Your job is to help them:
-- Understand how their current circuit works (or doesn't)
-- Debug problems ("why isn't my LED lighting up?")
-- Build circuits for them when they ask ("build me a 555 blink circuit")
-- Modify or extend their existing circuits
-- Explain electronics concepts at the level the user seems to be at
+Help them:
+- understand how their circuit works (or why it doesn't);
+- debug problems ("why isn't my LED lighting up?");
+- build or change circuits when they ask ("build me a 555 blink circuit");
+- learn electronics concepts at their level.
 
-CRITICAL RULES — YOU MUST FOLLOW THESE:
+Rules:
+1. When the user asks you to build, add, wire or change something, do it with your tools (add_component, add_wire, ...). Don't write wiring instructions for them to follow.
+2. If a part isn't in the catalog, create it with create_component_type (it is drawn with labelled pins but has no electrical model), then place and wire it.
+3. Build first, explain after: a short summary of what you placed, then suggest clicking Run.
+4. Never clear or replace a board that has components on it unless the user asked to start over. If a request seems to need a clean board, ask first ("Clear the current circuit and start over?"), or build beside the existing parts. clear_circuit refuses on a non-empty board otherwise.
+5. Tool results report problems (unknown pin, off-board position, overlap). Read them and fix the call; don't repeat a failing call unchanged.
+6. Be concise: the chat panel is narrow; 1-4 short paragraphs.
+7. Refer to component IDs and pin names from the circuit snapshot. If you need details about a component type (pins, size, properties), call list_component_types. If you lack information, ask one focused question.
+8. For Arduino/AVR sketches, suggest code in code blocks; the user edits and compiles them in the Sketch Editor.
 
-1. ALWAYS USE YOUR TOOLS. When the user asks you to build, create, add, wire, set up, or modify a circuit — you MUST call add_component, add_wire, etc. to build it directly. NEVER describe wiring steps for the user to follow. NEVER say "drag", "place", or "wire X to Y" as instructions. YOU do it by calling your tools. No exceptions.
+Board layout (grid coordinates):
+- Columns 0-30, rows 0-49. Board 1 is columns 0-14, board 2 is columns 16-30 (column 15 is the space between boards).
+- On board 1: columns 0-1 are the left power rails, 2-6 the left component area, 7 the centre gap, 8-12 the right component area, 13-14 the right power rails. Board 2 is the same shifted by 16 (gap at 23).
+- In the component area the 5 holes of one row on one side of the gap are connected. Rail holes connect in blocks of 5 rows.
+- Board holes are written "col,row" (e.g. "3,12"); there are no holes at columns 7, 15 and 23.
 
-2. NEVER REFUSE TO BUILD. If the user asks for a component that isn't in the catalog, use create_component_type to invent it. You can create ANY component — sensors, tubes, relays, motors, displays, connectors, anything. Create it with appropriate pins, then place it with add_component and wire it up. The component won't simulate electrically (it uses passthrough behavior), but it will appear on the board with labeled pins and correct wiring. This is valuable for learning, prototyping, and PCB export.
+Placement:
+- add_component's col,row is where the component's first pin lands.
+- DIP chips (width 2) straddle the gap: use col 6 on board 1 or col 22 on board 2; the left pins land on col 6 and the right pins on col 8.
+- Width-1 parts (resistors, LEDs, capacitors, switches) go in the component areas (cols 2-6 or 8-12, or 18-22 / 24-28 on board 2).
+- Leave a row or two between parts; a chip occupies several rows.
+- Power supplies go off the board: col -4, row 0-10.
 
-3. BUILD FIRST, EXPLAIN AFTER. When asked to build a circuit, immediately start calling tools. After the circuit is built, write a brief summary of what you placed and how it works. Do not ask permission or present options before building — just build it. If the user doesn't like it, they'll tell you.
+Wiring:
+- Wire pins to pins, or a pin to a board hole: { componentId: "board", pinId: "col,row" }.
+- Use board holes to reach the rails or to use the strips' internal connections.
 
-Guidelines:
-- Be concise. Most answers should fit in 1–4 short paragraphs. The chat panel is narrow.
-- When the user shares their circuit, refer to specific component IDs and pin names from the JSON.
-- Use components from the catalog below when available. When a component doesn't exist, create it with create_component_type.
-- After placing components and wiring them, give a brief summary of what you built and suggest the user click Run to test it.
-- If you don't have enough information, ask one focused question rather than guessing.
-- For Arduino/AVR sketches, the user can edit and recompile via the Sketch Editor — you can suggest sketch changes as code blocks.
-
-Placement rules:
-- ALL DIP chips (width=2) MUST be placed at col=6 on board 1 (or col=22 on board 2). This is automatically enforced — the system will correct other values. The chip's left pins land on col 6, right pins on col 8, straddling the center gap at col 7.
-- Width-1 components (resistors, LEDs, capacitors, switches) go in the component area: cols 2-6 (left side) or cols 8-12 (right side).
-- Space components vertically — each chip occupies several rows (e.g. a 555 timer is 4 rows tall). Leave at least 1-2 rows between components.
-- Power supplies use col=-4, row in the 0-10 range.
-
-Wiring rules:
-- Wire component pins directly to other component pins when they should connect.
-- To connect through the breadboard's internal wiring, wire a component pin to a bare board hole: { componentId: "board", pinId: "col,row" }. Pins in the same 5-pin strip (cols 2-6 same row, or cols 8-12 same row) are internally connected.
-- Power rails are cols 0-1 (positive) and cols 13-14 (negative) on each board. Rail pins in the same 5-row block are connected.
-- To connect a chip's left pin to a component on the right side (or vice versa), wire through board holes — the breadboard's internal strip wiring handles it.
-
-Available component catalog (id → label):
+Component catalog (type: label [pins] {properties}):
 {COMPONENT_CATALOG}`;
 
-// ---- Auto Model Selection ---- //
+// ---- Active requests (for Stop) ---- //
 
-function autoSelectModel(
-  userMessage: string,
-  conversationLength: number,
-  hasCircuitContext: boolean,
-): string {
-  const msg = userMessage.toLowerCase();
-  const wordCount = userMessage.split(/\s+/).length;
-
-  const complexPatterns = [
-    /\bdesign\b/, /\bbuild\b/, /\bcreate\b/, /\bmake\s+(me\s+)?a\b/,
-    /\bset\s+up\b/, /\bwire\s+up\b/, /\bput\s+together\b/,
-    /\badd\s+(a|an|the|some)\b/, /\bplace\s+(a|an|the)\b/,
-    /\bdebug\b/, /\btroubleshoot\b/, /\bdiagnos/,
-    /\boptimi[sz]e\b/, /\brefactor\b/, /\brewrite\b/,
-    /\bcompare\b.*\bvs\b/, /\btrade.?off/,
-    /\bexplain\s+(in\s+detail|how|why)\b.*\b(circuit|simulation|engine)\b/,
-    /\bpcb\b.*\blayout\b/, /\bschematic\b/,
-    /\bwrite\s+(me\s+)?(a\s+)?(sketch|code|program)\b/,
-    /\bstep.by.step\b/,
-    /\bcircuit\b/, /\bcounter\b/, /\btimer\b/, /\boscillator\b/, /\bamplifier\b/,
-  ];
-  const isComplex = complexPatterns.some((p) => p.test(msg));
-  const isLongConversation = conversationLength >= 10;
-  const isLongMessage = wordCount > 60;
-
-  if (isComplex || (isLongConversation && hasCircuitContext) || isLongMessage) {
-    return 'claude-opus-4-6';
-  }
-
-  const simplePatterns = [
-    /^(hi|hello|hey|thanks|thank you|ok|okay|got it|cool|nice)\b/,
-    /^what\s+(is|are)\s+(a|an|the)\s+\w+\??$/,
-    /^(how\s+many|which|where)\b.{0,40}\??$/,
-    /^(yes|no|yep|nope|sure)\b/,
-  ];
-  const isSimple = simplePatterns.some((p) => p.test(msg));
-  const isShort = wordCount <= 8;
-
-  if (isSimple && isShort && !hasCircuitContext) {
-    return 'claude-haiku-4-5';
-  }
-
-  return 'claude-sonnet-4-6';
+interface ActiveRequest {
+  controller: AbortController;
+  stream?: { abort(): void };
+  cancelToolWait?: () => void;
 }
 
-// ---- Tool Result IPC ---- //
+const active = new Map<string, ActiveRequest>();
 
-/**
- * Wait for the renderer to execute a batch of tool calls and return results.
- * We send the tool calls over IPC and set up a one-shot listener for the reply.
- */
-function executeToolCalls(
+/** Stop a running request (the Stop button). Returns true if one was running. */
+export function cancelChat(requestId: string): boolean {
+  const req = active.get(requestId);
+  if (!req) return false;
+  req.controller.abort();
+  req.stream?.abort();
+  req.cancelToolWait?.();
+  return true;
+}
+
+// ---- Tool round-trip ---- //
+
+type ToolWaitResult = { kind: 'ok'; results: ToolResultIn[] } | { kind: 'timeout' } | { kind: 'cancelled' };
+
+function waitForToolResults(
   webContents: WebContents,
   requestId: string,
-  toolCalls: { id: string; name: string; input: Record<string, unknown> }[],
-): Promise<{ id: string; result: CircuitActionResult }[]> {
+  toolCalls: { id: string; name: string; input: unknown }[],
+  entry: ActiveRequest,
+  isTrustedSender: (event: Electron.IpcMainEvent) => boolean,
+): Promise<ToolWaitResult> {
   return new Promise((resolve) => {
     const channel = `chat-tool-result-${requestId}`;
-    ipcMain.once(channel, (_event, results: { id: string; result: CircuitActionResult }[]) => {
-      resolve(results);
-    });
+    let settled = false;
+    const finish = (r: ToolWaitResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ipcMain.removeListener(channel, listener);
+      entry.cancelToolWait = undefined;
+      resolve(r);
+    };
+    const listener = (event: Electron.IpcMainEvent, results: unknown) => {
+      if (!isTrustedSender(event) || event.sender !== webContents) return;
+      finish({ kind: 'ok', results: sanitizeResults(results) });
+    };
+    const timer = setTimeout(() => finish({ kind: 'timeout' }), TOOL_RESULT_TIMEOUT_MS);
+    entry.cancelToolWait = () => finish({ kind: 'cancelled' });
+    ipcMain.on(channel, listener);
+    if (webContents.isDestroyed()) {
+      finish({ kind: 'cancelled' });
+      return;
+    }
     webContents.send('chat-stream-tool-calls', { requestId, toolCalls });
   });
 }
 
-// ---- Main Stream Function ---- //
+function sanitizeResults(raw: unknown): ToolResultIn[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ToolResultIn[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue;
+    const { id, result } = r as { id?: unknown; result?: { success?: unknown; message?: unknown; data?: unknown } };
+    if (typeof id !== 'string' || !result || typeof result !== 'object') continue;
+    const message = typeof result.message === 'string' ? result.message.slice(0, 4000) : '';
+    const data = result.data && typeof result.data === 'object' ? (result.data as Record<string, unknown>) : undefined;
+    out.push({ id, result: { success: result.success === true, message, data } });
+  }
+  return out;
+}
 
-export async function streamChat(
-  webContents: WebContents,
-  req: StreamChatRequest,
-): Promise<void> {
-  const { apiKey, messages, circuitContext, componentCatalog, requestId } = req;
+// ---- Errors ---- //
 
-  const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-  const model =
-    req.model === 'auto'
-      ? autoSelectModel(lastUserMsg?.content ?? '', messages.length, !!circuitContext)
-      : req.model;
-
-  const systemText = SYSTEM_PROMPT.replace('{COMPONENT_CATALOG}', componentCatalog);
-
-  // Build the initial message list. Circuit context is appended to the last
-  // user message (not the system prompt) to preserve cache stability.
-  const apiMessages: Anthropic.MessageParam[] = messages.map((m, i) => {
-    if (i === messages.length - 1 && m.role === 'user' && circuitContext) {
-      return {
-        role: 'user',
-        content: [
-          { type: 'text', text: m.content },
-          {
-            type: 'text',
-            text: `<current_circuit>\nThe user's current circuit (JSON):\n${circuitContext}\n</current_circuit>`,
-          },
-        ],
-      };
+export function describeError(err: unknown, model: string): { kind: string; message: string } {
+  const apiType = (err as { error?: { error?: { type?: string } } })?.error?.error?.type;
+  if (err instanceof Anthropic.APIUserAbortError) return { kind: 'cancelled', message: 'Stopped.' };
+  if (err instanceof Anthropic.AuthenticationError) {
+    return { kind: 'auth', message: 'Your Anthropic API key was rejected. Check or replace it in Settings.' };
+  }
+  if (err instanceof Anthropic.PermissionDeniedError) {
+    return { kind: 'permission', message: `This API key isn't allowed to use ${model}. Pick another model or check the key's workspace.` };
+  }
+  if (err instanceof Anthropic.NotFoundError) {
+    return { kind: 'not_found', message: `The model ${model} isn't available to this API key. Pick another model.` };
+  }
+  if (err instanceof Anthropic.RateLimitError) {
+    return { kind: 'rate_limit', message: 'You have hit the API rate limit. Wait a minute, then try again.' };
+  }
+  if (apiType === 'overloaded_error' || (err instanceof Anthropic.APIError && err.status === 529)) {
+    return { kind: 'overloaded', message: "Anthropic's servers are overloaded right now. Try again in a minute." };
+  }
+  if (err instanceof Anthropic.APIConnectionTimeoutError) {
+    return { kind: 'timeout', message: 'The request to Anthropic timed out. Check your connection and try again.' };
+  }
+  if (err instanceof Anthropic.APIConnectionError) {
+    return { kind: 'network', message: "Couldn't reach the Anthropic API. Check your internet connection and try again." };
+  }
+  if (err instanceof Anthropic.BadRequestError) {
+    const msg = err.message || '';
+    if (/credit balance/i.test(msg)) {
+      return { kind: 'billing', message: 'Your Anthropic credit balance is too low. Add credits at console.anthropic.com.' };
     }
-    return { role: m.role, content: m.content };
-  });
+    return { kind: 'bad_request', message: `The API rejected the request: ${msg}` };
+  }
+  if (err instanceof Anthropic.InternalServerError) {
+    return { kind: 'server', message: 'The Anthropic API had an internal error. Try again in a moment.' };
+  }
+  if (err instanceof Anthropic.APIError) {
+    return { kind: 'api_error', message: `The Anthropic API returned an error${err.status ? ` (${err.status})` : ''}: ${err.message || 'no details'}` };
+  }
+  if (err instanceof Error) return { kind: 'unknown', message: err.message || 'Something went wrong.' };
+  return { kind: 'unknown', message: 'Something went wrong.' };
+}
 
-  const client = new Anthropic({ apiKey });
+// ---- Main loop ---- //
 
-  if (webContents.isDestroyed()) return;
-  webContents.send('chat-stream-model', { requestId, model });
+function send(webContents: WebContents, channel: string, payload: unknown) {
+  if (!webContents.isDestroyed()) webContents.send(channel, payload);
+}
+
+export function buildSystemText(componentCatalog: string): string {
+  return SYSTEM_PROMPT.replace('{COMPONENT_CATALOG}', componentCatalog || '(catalog unavailable: call list_component_types)');
+}
+
+export async function runChat(webContents: WebContents, req: RunChatRequest): Promise<void> {
+  const { requestId, choice, conversation } = req;
+  const model = choice.model;
+  const entry: ActiveRequest = { controller: new AbortController() };
+  active.set(requestId, entry);
+  // Index of this turn's user message (the caller appends it before calling).
+  const startLen = conversation.messages.length - 1;
+
+  const client = req.client ?? new Anthropic({ apiKey: req.apiKey, maxRetries: 2, timeout: 5 * 60 * 1000 });
+  const systemText = buildSystemText(req.componentCatalog);
+  const tools = toolsForModel(model);
+
+  let total = emptyUsage();
+  let cost: number | null = 0;
+  let rounds = 0;
+  let stopReason: string | null = null;
+  const addRound = (u: TokenUsage) => {
+    rounds++;
+    total = addUsage(total, u);
+    const c = calculateCost(model, u);
+    cost = cost === null || c === null ? null : cost + c;
+  };
+  const notice = (kind: string, message: string) => send(webContents, 'chat-stream-notice', { requestId, kind, message });
+
+  send(webContents, 'chat-stream-model', { requestId, model, reason: choice.reason });
 
   try {
-    // Tool-use loop: Claude may return tool_use blocks that we need to
-    // execute and feed back before it continues with a text response.
-    let loopMessages = [...apiMessages];
-    let iterations = 0;
-    const MAX_ITERATIONS = 20; // safety cap
+    conversation.messages = closeOpenToolUse(conversation.messages);
+    const problem = validateHistory(conversation.messages);
+    if (problem) throw new Error(`The conversation history is invalid (${problem}). Click Clear to start a new conversation.`);
 
-    while (iterations < MAX_ITERATIONS) {
-      iterations++;
-
-      const stream = client.messages.stream({
-        model,
-        max_tokens: 4096,
-        system: [
-          {
-            type: 'text',
-            text: systemText,
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        tools: CIRCUIT_TOOLS,
-        messages: loopMessages,
-      });
-
-      // Collect text deltas for the UI and the full content blocks for
-      // the tool-use check after the stream ends.
-      stream.on('text', (delta) => {
-        if (webContents.isDestroyed()) return;
-        webContents.send('chat-stream-token', { requestId, delta });
-      });
-
-      const finalMessage = await stream.finalMessage();
-      if (webContents.isDestroyed()) return;
-
-      // Check if the response contains tool_use blocks
-      const toolUseBlocks = finalMessage.content.filter(
-        (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
-      );
-
-      if (toolUseBlocks.length === 0 || finalMessage.stop_reason !== 'tool_use') {
-        // No tool calls — we're done. Send the final done event.
-        webContents.send('chat-stream-done', {
-          requestId,
-          stopReason: finalMessage.stop_reason,
-          usage: {
-            inputTokens: finalMessage.usage.input_tokens,
-            outputTokens: finalMessage.usage.output_tokens,
-            cacheReadTokens: finalMessage.usage.cache_read_input_tokens ?? 0,
-            cacheWriteTokens: finalMessage.usage.cache_creation_input_tokens ?? 0,
-          },
-        });
-        return;
+    while (true) {
+      if (rounds >= MAX_ROUNDS) {
+        stopReason = 'max_rounds';
+        conversation.messages.push({ role: 'assistant', content: [{ type: 'text', text: `(stopped after ${MAX_ROUNDS} steps)` }] });
+        notice('max_rounds', `Claude stopped after ${MAX_ROUNDS} tool steps. Ask it to continue if the job isn't finished.`);
+        break;
       }
 
-      // Execute tool calls in the renderer
-      const toolCalls = toolUseBlocks.map((b) => ({
-        id: b.id,
-        name: b.name,
-        input: b.input as Record<string, unknown>,
-      }));
-
-      // Notify the UI that tool calls are being executed
-      webContents.send('chat-stream-token', {
-        requestId,
-        delta: '',
-        toolCalls: toolCalls.map((tc) => ({ name: tc.name, input: tc.input })),
-      });
-
-      const results = await executeToolCalls(webContents, requestId, toolCalls);
-
-      // Append the assistant's full response (including tool_use blocks)
-      // and the tool results to the conversation, then loop.
-      loopMessages = [
-        ...loopMessages,
-        { role: 'assistant' as const, content: finalMessage.content },
+      const stream = client.messages.stream(
         {
-          role: 'user' as const,
-          content: results.map((r) => ({
-            type: 'tool_result' as const,
-            tool_use_id: r.id,
-            content: JSON.stringify(r.result),
-          })),
+          model,
+          max_tokens: MAX_TOKENS,
+          system: [{ type: 'text', text: systemText, cache_control: { type: 'ephemeral' } }],
+          tools,
+          messages: withCacheBreakpoint(conversation.messages),
+          output_config: { effort: choice.effort },
         },
-      ];
+        { signal: entry.controller.signal },
+      );
+      entry.stream = stream;
+      stream.on('text', (delta) => send(webContents, 'chat-stream-token', { requestId, delta }));
+
+      let finalMessage: Anthropic.Message;
+      try {
+        finalMessage = await stream.finalMessage();
+      } catch (err) {
+        // Count whatever the aborted/failed round already used.
+        const partial = (stream as { currentMessage?: Anthropic.Message }).currentMessage;
+        if (partial?.usage) addRound(usageFromApi(partial.usage));
+        throw err;
+      }
+      addRound(usageFromApi(finalMessage.usage));
+      stopReason = finalMessage.stop_reason;
+
+      const toolUses = finalMessage.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
+
+      if (stopReason === 'tool_use' && toolUses.length > 0) {
+        conversation.messages.push(assistantTurn(finalMessage.content));
+        const toolCalls = toolUses.map((b) => ({ id: b.id, name: b.name, input: b.input as Record<string, unknown> }));
+        send(webContents, 'chat-stream-token', { requestId, delta: '', toolCalls: toolCalls.map((t) => ({ name: t.name, input: t.input })) });
+        const ids = toolUses.map((b) => b.id);
+        const wait = await waitForToolResults(webContents, requestId, toolCalls, entry, req.isTrustedSender);
+        if (wait.kind === 'cancelled' || entry.controller.signal.aborted) {
+          conversation.messages.push(cancelledResultsTurn(ids));
+          conversation.messages.push({ role: 'assistant', content: [{ type: 'text', text: STOPPED_TEXT }] });
+          stopReason = 'cancelled';
+          notice('cancelled', 'Stopped. Changes made so far stay on the board (Undo removes them).');
+          break;
+        }
+        if (wait.kind === 'timeout') {
+          conversation.messages.push(cancelledResultsTurn(ids, 'The app did not answer in time; the tool calls may not have run. Check the board with list_components.'));
+          notice('tool_timeout', 'The circuit editor did not answer in time; Claude was told the tools may not have run.');
+          continue;
+        }
+        conversation.messages.push(toolResultsTurn(ids, wait.results));
+        continue;
+      }
+
+      if (stopReason === 'pause_turn') {
+        // Long turn paused by the API: send it back so it continues.
+        conversation.messages.push(assistantTurn(finalMessage.content));
+        continue;
+      }
+
+      // Final answer (or a stop we must report). Unrun tool_use blocks are
+      // dropped so the stored history has no unanswered calls.
+      const keep = finalMessage.content.filter((b) => b.type !== 'tool_use');
+      conversation.messages.push(assistantTurn(keep));
+      if (stopReason === 'max_tokens') {
+        notice('max_tokens', "Claude's reply hit the length limit and was cut off. Ask it to continue.");
+      } else if (stopReason === 'refusal') {
+        notice('refusal', 'Claude declined to answer this request. Try rephrasing it.');
+      }
+      break;
     }
 
-    // If we hit the iteration cap, send done anyway
-    if (!webContents.isDestroyed()) {
-      webContents.send('chat-stream-done', {
-        requestId,
-        stopReason: 'max_iterations',
-        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      });
+    req.onUsage(model, total, cost, rounds);
+    send(webContents, 'chat-stream-done', { requestId, stopReason, usage: total, cost, rounds, model });
+  } catch (err) {
+    if (rounds > 0) req.onUsage(model, total, cost, rounds);
+    const aborted = entry.controller.signal.aborted || err instanceof Anthropic.APIUserAbortError;
+    if (aborted) {
+      // Keep the history valid: an unanswered user turn gets a stub reply.
+      const last = conversation.messages[conversation.messages.length - 1];
+      if (last?.role === 'user') conversation.messages.push({ role: 'assistant', content: [{ type: 'text', text: STOPPED_TEXT }] });
+      notice('cancelled', 'Stopped.');
+      send(webContents, 'chat-stream-done', { requestId, stopReason: 'cancelled', usage: total, cost, rounds, model });
+    } else {
+      const { kind, message } = describeError(err, model);
+      // The API never accepted this turn's request: drop the unanswered user
+      // turn so a retry doesn't send it twice. Mid-loop, close the turn instead.
+      const msgs = conversation.messages;
+      if (msgs.length === startLen + 1 && msgs[startLen]?.role === 'user') msgs.pop();
+      else if (msgs[msgs.length - 1]?.role === 'user') msgs.push({ role: 'assistant', content: [{ type: 'text', text: `(the request failed: ${kind})` }] });
+      send(webContents, 'chat-stream-error', { requestId, kind, message, usage: total, cost });
     }
-  } catch (err: unknown) {
-    if (webContents.isDestroyed()) return;
-    let message = 'Unknown error';
-    let kind = 'unknown';
-    if (err instanceof Anthropic.AuthenticationError) {
-      kind = 'auth';
-      message = 'Invalid API key. Update it in Settings.';
-    } else if (err instanceof Anthropic.RateLimitError) {
-      kind = 'rate_limit';
-      message = 'Rate limited by the Anthropic API. Try again in a moment.';
-    } else if (err instanceof Anthropic.BadRequestError) {
-      kind = 'bad_request';
-      message = `Bad request: ${err.message}`;
-    } else if (err instanceof Anthropic.APIError) {
-      kind = 'api_error';
-      message = `API error ${err.status}: ${err.message}`;
-    } else if (err instanceof Error) {
-      message = err.message;
-    }
-    webContents.send('chat-stream-error', { requestId, kind, message });
+  } finally {
+    active.delete(requestId);
   }
 }

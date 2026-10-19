@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { PlacedComponent, Wire } from '../types';
 import { COMPONENT_DEFINITIONS } from '../data/components';
+import { BOARD_X_OFFSET, GRID_H, GRID_W } from '../data/breadboard';
+import { renderCircuitContext, renderComponentCatalog } from '../ai/circuitContext';
+import { RequestBudget } from '../ai/toolValidation';
 
 interface ToolCallResult {
   success: boolean;
@@ -17,29 +21,24 @@ interface ChatPanelProps {
   onOpenSettings: () => void;
   /** Open the usage/cost panel. */
   onOpenUsage: () => void;
-  /** Execute circuit tool calls from the AI. Returns results for each tool call. */
+  /** Execute circuit tool calls from the AI (validated in App). Returns results for each tool call. */
   onExecuteToolCalls: (
     toolCalls: { id: string; name: string; input: Record<string, unknown> }[],
+    budget?: RequestBudget,
   ) => { id: string; result: ToolCallResult }[];
 }
 
 interface ChatMessage {
   id: string;
-  role: 'user' | 'assistant' | 'error';
+  role: 'user' | 'assistant' | 'error' | 'notice';
   content: string;
   /** True while we're still streaming tokens into this message. */
   streaming?: boolean;
 }
 
 /**
- * Hash a circuit snapshot to a stable string. We compare hashes to decide
- * whether the circuit has materially changed since we last sent it to
- * Claude — if not, "on-change" mode skips the JSON to save tokens.
- *
- * The hash is intentionally cheap and ignores live simulation state
- * (voltages, LED brightness) since those flip every tick and would defeat
- * the purpose. We hash only structure: id, type, position, rotation,
- * properties, plus wire endpoints and colors.
+ * Hash a circuit snapshot to a stable string. "on-change" mode only sends
+ * the circuit when this changes. Live simulation state is ignored.
  */
 function hashCircuit(components: PlacedComponent[], wires: Wire[]): string {
   const compStr = components
@@ -59,51 +58,16 @@ function hashCircuit(components: PlacedComponent[], wires: Wire[]): string {
   return `${compStr}::${wireStr}`;
 }
 
-/**
- * Render the circuit as compact JSON for Claude. We strip live simulation
- * state and keep only what's structurally meaningful.
- */
-function renderCircuitJson(
-  components: PlacedComponent[],
-  wires: Wire[],
-  selectedId: string | null,
-): string {
-  const compact = {
-    selected: selectedId,
-    components: components.map((c) => ({
-      id: c.id,
-      type: c.type,
-      position: c.position,
-      rotation: c.rotation,
-      properties: c.properties,
-    })),
-    wires: wires.map((w) => ({
-      id: w.id,
-      from: w.from,
-      to: w.to,
-      color: w.color,
-    })),
-  };
-  return JSON.stringify(compact, null, 2);
-}
-
-/** Render the available component catalog as a brief list. */
-function renderComponentCatalog(): string {
-  return Object.values(COMPONENT_DEFINITIONS)
-    .map((def) => `- ${def.type}: ${def.label} — ${def.description}`)
-    .join('\n');
-}
-
-const COMPONENT_CATALOG = renderComponentCatalog();
-
 type CircuitMode = 'always' | 'on-change' | 'never';
 
 const MODEL_OPTIONS: { id: string; label: string }[] = [
   { id: 'auto', label: 'Auto' },
-  { id: 'claude-opus-4-6', label: 'Opus 4.6' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' },
-  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  { id: 'claude-haiku-5-5', label: 'Haiku 5.5' },
 ];
+
+const DEFAULT_MODEL = 'claude-sonnet-5-5';
 
 /** Short display name for a model ID. */
 function modelShortName(modelId: string): string {
@@ -112,6 +76,41 @@ function modelShortName(modelId: string): string {
   if (modelId.includes('haiku')) return 'Haiku';
   return modelId;
 }
+
+function newId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function formatCost(cost: number | null | undefined): string {
+  if (cost === null || cost === undefined) return 'price unknown';
+  if (cost < 0.0001) return '<$0.0001';
+  return `~$${cost.toFixed(4)}`;
+}
+
+/** Links in Claude's answers open in the system browser (main allows https only). */
+const markdownComponents = {
+  a: ({ href, children }: { href?: string; children?: ReactNode }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  ),
+};
+
+const noticeStyle: CSSProperties = {
+  fontSize: '0.75rem',
+  color: '#fbbf24',
+  background: 'rgba(251, 191, 36, 0.08)',
+  border: '1px solid rgba(251, 191, 36, 0.25)',
+  borderRadius: 4,
+  padding: '4px 8px',
+  margin: '4px 0',
+};
+
+const reasonStyle: CSSProperties = {
+  fontSize: '0.7rem',
+  color: '#94a3b8',
+  padding: '2px 8px 6px',
+};
 
 export default function ChatPanel({
   components,
@@ -124,16 +123,19 @@ export default function ChatPanel({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [model, setModel] = useState('claude-opus-4-6');
+  const [model, setModel] = useState(DEFAULT_MODEL);
   const [circuitMode, setCircuitMode] = useState<CircuitMode>('on-change');
   const [sending, setSending] = useState(false);
   /** Status text shown while Claude is processing (thinking, building, etc.) */
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
-  /** When model is "auto", this holds the model the backend actually chose for the current/last response. */
+  /** The model answering this conversation, and why (one line). */
   const [resolvedModel, setResolvedModel] = useState<string | null>(null);
-  const resolvedModelRef = useRef<string | null>(null);
+  const [modelReason, setModelReason] = useState<string | null>(null);
+  const [lastCost, setLastCost] = useState<string | null>(null);
   const lastSentHash = useRef<string | null>(null);
   const activeRequestId = useRef<string | null>(null);
+  const conversationId = useRef<string>(newId('conv'));
+  const budgetRef = useRef<RequestBudget>(new RequestBudget(''));
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -142,20 +144,21 @@ export default function ChatPanel({
       setHasApiKey(!!cfg.hasApiKey);
       if (cfg.chatModel) setModel(cfg.chatModel);
       if (cfg.circuitContextMode) setCircuitMode(cfg.circuitContextMode);
-    });
+    }).catch(() => {});
   }, []);
 
   const handleModelChange = async (m: string) => {
     setModel(m);
+    setModelReason(null);
     if (window.electronApi?.chatSetModel) {
-      await window.electronApi.chatSetModel(m);
+      await window.electronApi.chatSetModel(m).catch(() => {});
     }
   };
 
   const handleCircuitModeChange = async (mode: CircuitMode) => {
     setCircuitMode(mode);
     if (window.electronApi?.chatSetCircuitMode) {
-      await window.electronApi.chatSetCircuitMode(mode);
+      await window.electronApi.chatSetCircuitMode(mode).catch(() => {});
     }
   };
 
@@ -164,14 +167,39 @@ export default function ChatPanel({
   const executeToolCallsRef = useRef(onExecuteToolCalls);
   executeToolCallsRef.current = onExecuteToolCalls;
 
-  // Wire up the streaming event subscription. The unsubscribe runs on
-  // unmount so we don't double-handle events if the panel re-mounts.
+  const finishStreaming = useCallback(() => {
+    setProcessingStatus(null);
+    setMessages((prev) => {
+      const next = [...prev];
+      const last = next[next.length - 1];
+      if (last && last.role === 'assistant' && last.streaming) {
+        if (last.content.trim()) next[next.length - 1] = { ...last, streaming: false };
+        else next.pop();
+      }
+      return next;
+    });
+    setSending(false);
+    activeRequestId.current = null;
+  }, []);
+
+  /** Insert a notice above the streaming answer (or at the end). */
+  const addNotice = useCallback((content: string) => {
+    setMessages((prev) => {
+      const next = [...prev];
+      const notice: ChatMessage = { id: newId('n'), role: 'notice', content };
+      const last = next[next.length - 1];
+      if (last && last.role === 'assistant' && last.streaming) next.splice(next.length - 1, 0, notice);
+      else next.push(notice);
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     if (!window.electronApi?.onChatStream) return;
     const unsubscribe = window.electronApi.onChatStream({
       onToken: ({ requestId, delta }) => {
-        if (requestId !== activeRequestId.current) return;
-        setProcessingStatus(null); // Clear status once tokens start arriving
+        if (requestId !== activeRequestId.current || !delta) return;
+        setProcessingStatus(null);
         setMessages((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
@@ -181,68 +209,62 @@ export default function ChatPanel({
           return next;
         });
       },
-      onModel: ({ requestId, model: resolvedId }) => {
+      onModel: ({ requestId, model: resolvedId, reason }) => {
         if (requestId !== activeRequestId.current) return;
         setResolvedModel(resolvedId);
-        resolvedModelRef.current = resolvedId;
+        setModelReason(reason ?? null);
       },
       onToolCalls: ({ requestId, toolCalls }) => {
         if (requestId !== activeRequestId.current) return;
-        // Show what Claude is doing
         const toolNames = toolCalls.map((tc) => tc.name);
-        if (toolNames.some((n) => n === 'clear_circuit')) {
-          setProcessingStatus('Clearing circuit...');
-        } else if (toolNames.some((n) => n === 'create_component_type')) {
-          setProcessingStatus('Creating new component...');
-        } else if (toolNames.some((n) => n === 'add_component' || n === 'add_wire')) {
-          setProcessingStatus('Building circuit...');
-        } else if (toolNames.some((n) => n === 'remove_component' || n === 'remove_wire')) {
-          setProcessingStatus('Modifying circuit...');
-        } else {
-          setProcessingStatus('Working...');
+        if (toolNames.includes('clear_circuit')) setProcessingStatus('Clearing circuit...');
+        else if (toolNames.includes('create_component_type')) setProcessingStatus('Creating new component...');
+        else if (toolNames.some((n) => n === 'add_component' || n === 'add_wire')) setProcessingStatus('Building circuit...');
+        else if (toolNames.some((n) => n === 'remove_component' || n === 'remove_wire')) setProcessingStatus('Modifying circuit...');
+        else setProcessingStatus('Working...');
+
+        let results: { id: string; result: ToolCallResult }[];
+        try {
+          results = executeToolCallsRef.current(toolCalls, budgetRef.current);
+        } catch (err) {
+          results = toolCalls.map((tc) => ({
+            id: tc.id,
+            result: { success: false, message: `The app failed to run the tool: ${err instanceof Error ? err.message : String(err)}` },
+          }));
         }
-        // Execute tool calls synchronously on the circuit state and send results back.
-        const results = executeToolCallsRef.current(toolCalls);
-        if (window.electronApi?.chatSendToolResults) {
-          window.electronApi.chatSendToolResults(requestId, results);
-        }
-      },
-      onDone: ({ requestId, usage }) => {
-        if (requestId !== activeRequestId.current) return;
-        setProcessingStatus(null);
-        setMessages((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          if (last && last.role === 'assistant' && last.streaming) {
-            next[next.length - 1] = { ...last, streaming: false };
+        // Make big changes visible: clearing the board is announced.
+        toolCalls.forEach((tc) => {
+          const r = results.find((x) => x.id === tc.id)?.result;
+          if (tc.name === 'clear_circuit' && r?.success && !/already empty/.test(r.message)) {
+            addNotice('Claude cleared the board. Undo (Ctrl+Z) brings it back.');
           }
-          return next;
         });
-        // Record usage for cost tracking
-        if (window.electronApi?.usageRecord && usage) {
-          window.electronApi.usageRecord({
-            model: resolvedModelRef.current || model,
-            ...usage,
-          }).catch(() => {});
-        }
-        setSending(false);
-        activeRequestId.current = null;
+        window.electronApi?.chatSendToolResults?.(requestId, results);
+      },
+      onNotice: ({ requestId, message }) => {
+        if (requestId !== activeRequestId.current) return;
+        addNotice(message);
+      },
+      onDone: ({ requestId, cost, rounds }) => {
+        if (requestId !== activeRequestId.current) return;
+        setLastCost(`Last answer: ${formatCost(cost)}${rounds && rounds > 1 ? ` over ${rounds} steps` : ''} (estimate)`);
+        finishStreaming();
       },
       onError: ({ requestId, message }) => {
         if (requestId !== activeRequestId.current) return;
         setProcessingStatus(null);
         setMessages((prev) => {
-          // Replace the streaming placeholder with an error message.
           const next = [...prev];
           const last = next[next.length - 1];
           if (last && last.role === 'assistant' && last.streaming) {
-            next[next.length - 1] = {
-              id: last.id,
-              role: 'error',
-              content: message,
-            };
+            if (last.content.trim()) {
+              next[next.length - 1] = { ...last, streaming: false };
+              next.push({ id: newId('err'), role: 'error', content: message });
+            } else {
+              next[next.length - 1] = { id: last.id, role: 'error', content: message };
+            }
           } else {
-            next.push({ id: `err-${Date.now()}`, role: 'error', content: message });
+            next.push({ id: newId('err'), role: 'error', content: message });
           }
           return next;
         });
@@ -251,7 +273,7 @@ export default function ChatPanel({
       },
     });
     return unsubscribe;
-  }, []);
+  }, [addNotice, finishStreaming]);
 
   // Auto-scroll the message list to the bottom on every new token.
   useEffect(() => {
@@ -260,83 +282,95 @@ export default function ChatPanel({
     }
   }, [messages]);
 
-  const componentCatalog = useMemo(() => COMPONENT_CATALOG, []);
-
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || sending) return;
     if (!hasApiKey) return;
     if (!window.electronApi?.chatSend) return;
 
-    // Decide whether to send the circuit context this turn.
+    const grid = { GRID_W, GRID_H, BOARD_X_OFFSET };
     let circuitContext = '';
-    if (circuitMode === 'always') {
-      circuitContext = renderCircuitJson(components, wires, selectedComponent?.id ?? null);
-      lastSentHash.current = hashCircuit(components, wires);
-    } else if (circuitMode === 'on-change') {
-      const hash = hashCircuit(components, wires);
-      if (hash !== lastSentHash.current) {
-        circuitContext = renderCircuitJson(components, wires, selectedComponent?.id ?? null);
-        lastSentHash.current = hash;
-      }
+    const hash = hashCircuit(components, wires);
+    if (circuitMode === 'always' || (circuitMode === 'on-change' && hash !== lastSentHash.current)) {
+      circuitContext = renderCircuitContext(components, wires, selectedComponent?.id ?? null, COMPONENT_DEFINITIONS, grid);
+      lastSentHash.current = hash;
     }
+    // Built now, so custom chips loaded or created since start are included.
+    const componentCatalog = renderComponentCatalog(COMPONENT_DEFINITIONS);
 
-    const userMsg: ChatMessage = {
-      id: `u-${Date.now()}`,
-      role: 'user',
-      content: trimmed,
-    };
-    const assistantMsg: ChatMessage = {
-      id: `a-${Date.now()}`,
-      role: 'assistant',
-      content: '',
-      streaming: true,
-    };
+    const userMsg: ChatMessage = { id: newId('u'), role: 'user', content: trimmed };
+    const assistantMsg: ChatMessage = { id: newId('a'), role: 'assistant', content: '', streaming: true };
     const nextMessages = [...messages, userMsg, assistantMsg];
     setMessages(nextMessages);
     setInput('');
     setSending(true);
     setProcessingStatus('Thinking...');
+    setLastCost(null);
 
-    // The full history we send to Claude excludes our streaming-placeholder
-    // assistant message and any error messages (which the API doesn't
-    // understand). Map ChatMessage → the SDK shape.
+    // Plain-text history for compatibility; main uses its own full history
+    // for this conversationId.
     const apiHistory = nextMessages
-      .filter((m) => m.role !== 'error' && !m.streaming)
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && !m.streaming)
       .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }));
 
-    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const requestId = newId('req');
     activeRequestId.current = requestId;
+    budgetRef.current = new RequestBudget(trimmed);
 
-    await window.electronApi.chatSend({
-      requestId,
-      messages: apiHistory,
-      circuitContext,
-      componentCatalog,
-    });
-  }, [
-    input,
-    sending,
-    hasApiKey,
-    circuitMode,
-    components,
-    wires,
-    selectedComponent,
-    messages,
-    componentCatalog,
-  ]);
+    try {
+      await window.electronApi.chatSend({
+        requestId,
+        conversationId: conversationId.current,
+        messages: apiHistory,
+        circuitContext,
+        componentCatalog,
+      });
+    } catch (err) {
+      if (activeRequestId.current !== requestId) return;
+      setMessages((prev) => {
+        const next = prev.filter((m) => m.id !== assistantMsg.id);
+        next.push({ id: newId('err'), role: 'error', content: err instanceof Error ? err.message : String(err) });
+        return next;
+      });
+      setProcessingStatus(null);
+      setSending(false);
+      activeRequestId.current = null;
+      lastSentHash.current = null;
+    }
+  }, [input, sending, hasApiKey, circuitMode, components, wires, selectedComponent, messages]);
+
+  const handleStop = useCallback(async () => {
+    const requestId = activeRequestId.current;
+    if (!requestId) return;
+    setProcessingStatus('Stopping...');
+    let running = false;
+    try {
+      running = (await window.electronApi?.chatCancel?.(requestId)) ?? false;
+    } catch {
+      running = false;
+    }
+    // Nothing running in main any more: unstick the panel ourselves.
+    if (!running && activeRequestId.current === requestId) finishStreaming();
+  }, [finishStreaming]);
 
   const handleClear = useCallback(() => {
+    if (sending) return;
+    const old = conversationId.current;
+    window.electronApi?.chatResetConversation?.(old).catch(() => {});
+    conversationId.current = newId('conv');
     setMessages([]);
+    setResolvedModel(null);
+    setModelReason(null);
+    setLastCost(null);
     lastSentHash.current = null;
-  }, []);
+  }, [sending]);
 
   return (
     <div className="chat-panel">
       <div className="chat-header">
         <span className="chat-title">Claude</span>
         {messages.length > 0 && (
-          <button type="button" className="chat-clear-btn" onClick={handleClear} title="Clear conversation">
+          <button type="button" className="chat-clear-btn" onClick={handleClear} disabled={sending} title="Start a new conversation">
             Clear
           </button>
         )}
@@ -359,30 +393,36 @@ export default function ChatPanel({
             )}
           </div>
         )}
-        {messages.map((m) => (
-          <div key={m.id} className={`chat-msg chat-msg-${m.role}`}>
-            <div className="chat-msg-role">
-              {m.role === 'user' ? 'You' : m.role === 'assistant' ? 'Claude' : 'Error'}
+        {messages.map((m) =>
+          m.role === 'notice' ? (
+            <div key={m.id} style={noticeStyle} role="status">
+              {m.content}
             </div>
-            <div className="chat-msg-body">
-              {m.content ? (
-                <>
-                  <ReactMarkdown>{m.content}</ReactMarkdown>
-                  {m.streaming && !processingStatus && <span className="chat-cursor">▋</span>}
-                </>
-              ) : null}
-              {m.streaming && processingStatus && (
-                <div className="chat-processing">
-                  <span className="chat-processing-dot" />
-                  {processingStatus}
-                </div>
-              )}
-              {m.streaming && !m.content && !processingStatus && (
-                <span className="chat-cursor">▋</span>
-              )}
+          ) : (
+            <div key={m.id} className={`chat-msg chat-msg-${m.role}`}>
+              <div className="chat-msg-role">
+                {m.role === 'user' ? 'You' : m.role === 'assistant' ? 'Claude' : 'Error'}
+              </div>
+              <div className="chat-msg-body">
+                {m.content ? (
+                  <>
+                    <ReactMarkdown components={markdownComponents}>{m.content}</ReactMarkdown>
+                    {m.streaming && !processingStatus && <span className="chat-cursor">▋</span>}
+                  </>
+                ) : null}
+                {m.streaming && processingStatus && (
+                  <div className="chat-processing">
+                    <span className="chat-processing-dot" />
+                    {processingStatus}
+                  </div>
+                )}
+                {m.streaming && !m.content && !processingStatus && (
+                  <span className="chat-cursor">▋</span>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          ),
+        )}
       </div>
 
       <div className="chat-input-row">
@@ -400,15 +440,21 @@ export default function ChatPanel({
             }
           }}
         />
-        <button
-          type="button"
-          className="chat-send-btn"
-          onClick={handleSend}
-          disabled={!hasApiKey || sending || !input.trim()}
-          title="Send (Enter)"
-        >
-          {sending ? '...' : 'Send'}
-        </button>
+        {sending ? (
+          <button type="button" className="chat-send-btn" onClick={handleStop} title="Stop Claude">
+            Stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="chat-send-btn"
+            onClick={handleSend}
+            disabled={!hasApiKey || !input.trim()}
+            title="Send (Enter)"
+          >
+            Send
+          </button>
+        )}
       </div>
 
       <div className="chat-options-row">
@@ -448,6 +494,13 @@ export default function ChatPanel({
           $
         </button>
       </div>
+      {(modelReason || lastCost) && (
+        <div style={reasonStyle}>
+          {modelReason}
+          {modelReason && lastCost ? ' · ' : ''}
+          {lastCost}
+        </div>
+      )}
     </div>
   );
 }
