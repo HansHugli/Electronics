@@ -82,7 +82,14 @@ interface DataStatus {
 interface ElectronApi {
   appName: string;
   getVersion: () => Promise<string>;
+  /**
+   * Save. With a currentPath that is an .ecx opened or saved this session
+   * (or inside the data folder) it writes straight to it; otherwise it
+   * shows the save dialog. Resolves null when cancelled.
+   */
   saveCircuit: (data: string, currentPath?: string) => Promise<{ filePath: string; name: string } | null>;
+  /** Save As: always shows the save dialog. Resolves null when cancelled. */
+  saveCircuitAs: (data: string, defaultPath?: string) => Promise<{ filePath: string; name: string } | null>;
   loadCircuit: () => Promise<{ filePath: string; name: string; data: string } | null>;
   getConfig: () => Promise<AppConfigSafe>;
   getDataStatus: () => Promise<DataStatus>;

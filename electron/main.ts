@@ -6,12 +6,13 @@ import os from 'os';
 import { getSetupStatus, downloadCli, installCore, compileSketch } from './arduinoCli';
 import { cancelChat, ChatMessage, runChat } from './claudeChat';
 import { closeOpenToolUse, ConversationStore, historyFromPlain, userTurn } from './chatHistory';
-import { AppConfig, CircuitContextMode, ConfigStore } from './config';
+import { AppConfig, CircuitContextMode, ConfigStore, timestampForFile } from './config';
 import { autosaveFileName, defaultDataDir, LEGACY_AUTOSAVE_NAME } from './dataPaths';
 import {
   atomicWriteFileSync,
   friendlyFsError,
   isValidCircuitName,
+  isInside,
   isValidTypeId,
   resolveInside,
 } from './fsSafe';
@@ -187,19 +188,55 @@ function windowOf(event: Electron.IpcMainInvokeEvent): BrowserWindow | null {
 
 // ---- Circuits ---- //
 
-handle('save-circuit', async (event, data, currentPath) => {
-  const text = requireString(data, 'circuit');
-  const win = windowOf(event);
-  if (!win) return null;
-  const dir = getCircuitsDir();
+/** .ecx files the user opened or saved this session: Save may write to them without a dialog. */
+const knownCircuitFiles = new Set<string>();
+
+function rememberCircuitFile(filePath: string) {
+  knownCircuitFiles.add(path.resolve(filePath).toLowerCase());
+}
+
+/**
+ * A path Save may write to directly: absolute, ending in .ecx, and either
+ * opened/saved this session or inside the data folder.
+ */
+function isDirectSaveTarget(p: unknown): p is string {
+  if (typeof p !== 'string' || !p || !path.isAbsolute(p) || !/\.ecx$/i.test(p)) return false;
+  const resolved = path.resolve(p);
+  return knownCircuitFiles.has(resolved.toLowerCase()) || isInside(dataDir(), resolved);
+}
+
+async function saveWithDialog(win: BrowserWindow, text: string, defaultPath: unknown) {
   const result = await dialog.showSaveDialog(win, {
     title: 'Save Circuit',
-    defaultPath: typeof currentPath === 'string' && currentPath ? currentPath : path.join(dir, 'untitled.ecx'),
+    defaultPath: typeof defaultPath === 'string' && defaultPath ? defaultPath : path.join(getCircuitsDir(), 'untitled.ecx'),
     filters: [ECX_FILTER],
   });
   if (result.canceled || !result.filePath) return null;
   writeTextFile(result.filePath, text);
+  rememberCircuitFile(result.filePath);
   return { filePath: result.filePath, name: path.basename(result.filePath, '.ecx') };
+}
+
+// Save: straight to the current file when it is a known .ecx, else a dialog.
+handle('save-circuit', async (event, data, currentPath) => {
+  const text = requireString(data, 'circuit');
+  if (isDirectSaveTarget(currentPath)) {
+    writeTextFile(currentPath, text);
+    rememberCircuitFile(currentPath);
+    return { filePath: currentPath, name: path.basename(currentPath, path.extname(currentPath)) };
+  }
+  const win = windowOf(event);
+  if (!win) return null;
+  // An unknown path is only offered as the dialog's default, never written blindly.
+  return saveWithDialog(win, text, currentPath);
+});
+
+// Save As: always asks.
+handle('save-circuit-as', async (event, data, defaultPath) => {
+  const text = requireString(data, 'circuit');
+  const win = windowOf(event);
+  if (!win) return null;
+  return saveWithDialog(win, text, defaultPath);
 });
 
 handle('load-circuit', async (event) => {
@@ -214,6 +251,7 @@ handle('load-circuit', async (event) => {
   if (result.canceled || result.filePaths.length === 0) return null;
   const filePath = result.filePaths[0];
   const data = readTextFile(filePath);
+  rememberCircuitFile(filePath);
   return { filePath, name: path.basename(filePath, '.ecx'), data };
 });
 
@@ -554,20 +592,35 @@ handle('load-autosave', async () => {
       if (!fs.existsSync(file)) continue;
       const data = readTextFile(file);
       try {
-        JSON.parse(data);
+        const parsed = JSON.parse(data);
+        // The circuit file the autosave was editing may be saved to directly.
+        if (parsed && typeof parsed.currentFilePath === 'string' && /\.ecx$/i.test(parsed.currentFilePath) && fs.existsSync(parsed.currentFilePath)) {
+          rememberCircuitFile(parsed.currentFilePath);
+        }
         return { data };
       } catch {
-        // Damaged: try its backup before giving up on this candidate.
+        // Damaged: keep a copy (once: the original is moved aside) so the
+        // next autosave can't overwrite it, then try the backup.
+        const copy = path.join(
+          path.dirname(file),
+          `${path.basename(file, '.ecx')}.corrupt-${timestampForFile(new Date())}.ecx`,
+        );
+        let kept = '';
+        try {
+          fs.renameSync(file, copy);
+          kept = ` A copy was kept as ${path.basename(copy)}.`;
+        } catch { /* leave it in place */ }
         const bak = `${file}.bak`;
         if (fs.existsSync(bak)) {
           const backup = readTextFile(bak);
-          JSON.parse(backup);
-          return { data: backup };
+          try {
+            JSON.parse(backup);
+            return { data: backup };
+          } catch { /* the backup is damaged too */ }
         }
+        throw new Error(`The autosave ${path.basename(file)} is damaged and could not be read.${kept}`);
       }
     }
-    return null;
-  } catch {
     return null;
   } finally {
     autosaveRestored = true;
@@ -691,8 +744,10 @@ function createMainWindow() {
     {
       label: 'File',
       submenu: [
-        { label: 'Save\tCtrl+S', click: () => send('save') },
+        { label: 'New', accelerator: 'CmdOrCtrl+N', click: () => send('new') },
         { label: 'Open\tCtrl+O', click: () => send('open') },
+        { label: 'Save\tCtrl+S', click: () => send('save') },
+        { label: 'Save As…', accelerator: 'CmdOrCtrl+Shift+S', click: () => send('save-as') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],

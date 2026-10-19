@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld('electronApi', {
   appName: 'E101 Electronics Simulator',
   getVersion: () => invoke('get-version'),
   saveCircuit: (data: string, currentPath?: string) => invoke('save-circuit', data, currentPath),
+  saveCircuitAs: (data: string, defaultPath?: string) => invoke('save-circuit-as', data, defaultPath),
   loadCircuit: () => invoke('load-circuit'),
   getConfig: () => invoke('get-config'),
   getDataStatus: () => invoke('app:get-data-status'),
