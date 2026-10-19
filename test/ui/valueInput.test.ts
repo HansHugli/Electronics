@@ -1,15 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { parseSI, parseValueInput, formatValueInput, formatSIShort } from '../../src/components/valueInput';
 
-describe('parseSI (local fallback of the shared contract)', () => {
+describe('parseSI (the shared parser in src/utils/format.ts)', () => {
   it.each([
     ['4.7k', 4700], ['100n', 1e-7], ['1M', 1e6], ['2.2µ', 2.2e-6], ['2.2u', 2.2e-6], ['2.2μ', 2.2e-6],
     ['10', 10], ['  15 ', 15], ['1e3', 1000], ['.5', 0.5], ['-3', -3], ['5m', 0.005], ['3p', 3e-12], ['1G', 1e9],
+    // Resistor codes, as printed on parts and schematics; spaces are ignored.
+    ['4k7', 4700], ['1 k 2', 1200],
   ])('%s → %s', (text, expected) => {
     expect(parseSI(text)).toBeCloseTo(expected, 15);
   });
 
-  it.each(['', 'k', 'abc', '1..2', '4.7kk', '1 k 2'])('rejects %j', (text) => {
+  it.each(['', 'k', 'abc', '1..2', '4.7kk'])('rejects %j', (text) => {
     expect(parseSI(text)).toBeNull();
   });
 });

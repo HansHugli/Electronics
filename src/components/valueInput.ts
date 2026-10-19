@@ -1,18 +1,6 @@
-/*
- * TEMPORARY local fallback for parseSI (shared contract): the engine branch
- * exports `parseSI(text): number | null` from src/utils/format.ts. After the
- * merge, delete this function and import parseSI from '../utils/format'.
- */
-const SI_PREFIX: Record<string, number> = {
-  p: 1e-12, n: 1e-9, u: 1e-6, 'µ': 1e-6, 'μ': 1e-6, m: 1e-3,
-  k: 1e3, K: 1e3, M: 1e6, G: 1e9,
-};
-export function parseSI(text: string): number | null {
-  const m = /^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*([pnuµμmkKMG])?\s*$/.exec(text);
-  if (!m) return null;
-  const n = Number(m[1]) * (m[2] ? SI_PREFIX[m[2]] : 1);
-  return Number.isFinite(n) ? n : null;
-}
+import { parseSI } from '../utils/format';
+
+export { parseSI };
 
 /** How a property's unit maps to SI: μF is stored as micro-farads. */
 const UNIT_MAP: Record<string, { base: string; exp: number }> = {

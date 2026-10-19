@@ -368,8 +368,6 @@ function App({ skipRestore = false }: { skipRestore?: boolean }) {
       setSimTime(simTimeMs);
     },
   });
-  // simClock.lagging / simClock.effectiveSpeed are for the toolbar's sim clock.
-  void simClock;
 
   /**
    * Change the circuit as one undoable step. Computes from the latest state
@@ -957,7 +955,9 @@ function App({ skipRestore = false }: { skipRestore?: boolean }) {
               };
             }
 
-            const pinsPerSide = Math.ceil(spec.pins.length / 2);
+            // Tall enough for the busiest side, so pins never overlap.
+            const countOn = (side: string) => spec.pins.filter((pp) => pp.side === side).length;
+            const pinsPerSide = Math.max(1, countOn('left'), countOn('right'));
             const chipJson: ChipDefinitionJSON = {
               type: spec.type,
               label: spec.label,
@@ -973,11 +973,15 @@ function App({ skipRestore = false }: { skipRestore?: boolean }) {
                 const sameSide = spec.pins.filter((pp) => pp.side === p.side);
                 const sideIdx = sameSide.indexOf(p);
                 const totalOnSide = sameSide.length;
+                // Like a real DIP (counter-clockwise from pin 1 at the top left): the left
+                // side runs top to bottom and the right side bottom to top, so the last pin
+                // sits across from pin 1. Top and bottom sides run left to right.
+                const along = (2 * sideIdx + 1) / (2 * totalOnSide);
                 return {
                   id: p.id,
                   label: p.label,
                   side: p.side,
-                  offset: totalOnSide === 1 ? 0.5 : (2 * (totalOnSide - 1 - sideIdx) + 1) / (2 * totalOnSide),
+                  offset: p.side === 'right' ? 1 - along : along,
                   type: p.type,
                   number: i + 1,
                 };
@@ -1404,6 +1408,8 @@ function App({ skipRestore = false }: { skipRestore?: boolean }) {
           circuitName={circuitName}
           dirty={dirty}
           simTime={simTime}
+          lagging={simClock.lagging}
+          effectiveSpeed={simClock.effectiveSpeed}
         />
         <div className="canvas-container">
           <Breadboard
