@@ -10,12 +10,15 @@ export default function SettingsDialog({ onClose }: SettingsDialogProps) {
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState(false);
+  const [keyStorage, setKeyStorage] = useState<AppConfigSafe['keyStorage']>('none');
+  const [keyError, setKeyError] = useState<string | null>(null);
 
   useEffect(() => {
     if (window.electronApi?.getConfig) {
       window.electronApi.getConfig().then((config) => {
         setDataPath(config.dataFilePath);
         setHasApiKey(!!config.hasApiKey);
+        setKeyStorage(config.keyStorage ?? (config.hasApiKey ? 'plaintext' : 'none'));
         setLoading(false);
       });
     } else {
@@ -29,16 +32,30 @@ export default function SettingsDialog({ onClose }: SettingsDialogProps) {
     const trimmed = apiKeyInput.trim();
     if (!trimmed) return;
     setSavingKey(true);
-    const result = await window.electronApi.chatSetApiKey(trimmed);
-    setHasApiKey(result.hasApiKey);
-    setApiKeyInput('');
-    setSavingKey(false);
+    setKeyError(null);
+    try {
+      const result = await window.electronApi.chatSetApiKey(trimmed);
+      setHasApiKey(result.hasApiKey);
+      setApiKeyInput('');
+      const cfg = await window.electronApi.getConfig();
+      setKeyStorage(cfg.keyStorage ?? 'none');
+    } catch (err) {
+      setKeyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingKey(false);
+    }
   };
 
   const handleClearKey = async () => {
     if (!window.electronApi?.chatClearApiKey) return;
-    await window.electronApi.chatClearApiKey();
-    setHasApiKey(false);
+    setKeyError(null);
+    try {
+      await window.electronApi.chatClearApiKey();
+      setHasApiKey(false);
+      setKeyStorage('none');
+    } catch (err) {
+      setKeyError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   return (
@@ -90,8 +107,12 @@ export default function SettingsDialog({ onClose }: SettingsDialogProps) {
               </button>
             </div>
           )}
+          {keyError && <p className="settings-hint" style={{ color: '#f87171' }}>{keyError}</p>}
           <p className="settings-hint">
-            Powers the in-app Claude chat. Stored locally in your config file. Get one at console.anthropic.com.
+            Powers the in-app Claude chat. Get one at console.anthropic.com.{' '}
+            {keyStorage === 'plaintext'
+              ? 'This system has no secure key storage, so the key is kept unencrypted in your settings file.'
+              : 'The key is encrypted with your system account and never leaves this computer except to call Anthropic.'}
           </p>
         </div>
 

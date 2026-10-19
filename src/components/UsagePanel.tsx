@@ -16,28 +16,37 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarEleme
 
 export default function UsagePanel({ onClose }: { onClose: () => void }) {
   const [records, setRecords] = useState<UsageRecord[]>([]);
+  const [pricing, setPricing] = useState<ModelPricingRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!window.electronApi?.usageGet) {
       setLoading(false);
       return;
     }
-    window.electronApi.usageGet().then((data) => {
-      setRecords(data);
-      setLoading(false);
-    });
+    window.electronApi.usageGet()
+      .then((data) => setRecords(data))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setLoading(false));
+    window.electronApi.usagePricing?.().then(setPricing).catch(() => {});
   }, []);
 
   const handleClear = useCallback(async () => {
-    if (!window.confirm('Clear all usage history?')) return;
-    if (window.electronApi?.usageClear) {
+    setConfirmingClear(false);
+    if (!window.electronApi?.usageClear) return;
+    try {
       await window.electronApi.usageClear();
       setRecords([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }, []);
 
-  const totalCost = records.reduce((sum, r) => sum + r.cost, 0);
+  const cost = (r: UsageRecord) => (typeof r.cost === 'number' && Number.isFinite(r.cost) ? r.cost : 0);
+  const unknownPriced = records.filter((r) => r.cost === null || r.cost === undefined).length;
+  const totalCost = records.reduce((sum, r) => sum + cost(r), 0);
   const totalInput = records.reduce((sum, r) => sum + r.inputTokens, 0);
   const totalOutput = records.reduce((sum, r) => sum + r.outputTokens, 0);
 
@@ -47,8 +56,8 @@ export default function UsagePanel({ onClose }: { onClose: () => void }) {
   let runningTotal = 0;
   for (const r of records) {
     const date = r.timestamp.slice(0, 10); // YYYY-MM-DD
-    dailyMap.set(date, (dailyMap.get(date) || 0) + r.cost);
-    runningTotal += r.cost;
+    dailyMap.set(date, (dailyMap.get(date) || 0) + cost(r));
+    runningTotal += cost(r);
     cumulativeMap.set(date, runningTotal);
   }
   const dates = Array.from(cumulativeMap.keys());
@@ -61,7 +70,7 @@ export default function UsagePanel({ onClose }: { onClose: () => void }) {
     const label = shortModel(r.model);
     const entry = modelTotals.get(label) || { count: 0, cost: 0 };
     entry.count++;
-    entry.cost += r.cost;
+    entry.cost += cost(r);
     modelTotals.set(label, entry);
   }
 
@@ -135,7 +144,7 @@ export default function UsagePanel({ onClose }: { onClose: () => void }) {
             <div className="usage-summary">
               <div className="usage-stat">
                 <span className="usage-stat-value">${totalCost.toFixed(4)}</span>
-                <span className="usage-stat-label">Total Cost</span>
+                <span className="usage-stat-label">Estimated Cost</span>
               </div>
               <div className="usage-stat">
                 <span className="usage-stat-value">{records.length}</span>
@@ -154,6 +163,12 @@ export default function UsagePanel({ onClose }: { onClose: () => void }) {
             <div className="usage-chart-container">
               <Line data={chartData} options={chartOptions} />
             </div>
+
+            {unknownPriced > 0 && (
+              <p style={{ color: '#fbbf24', fontSize: '0.75rem' }}>
+                {unknownPriced} request{unknownPriced === 1 ? '' : 's'} used a model with an unknown price and {unknownPriced === 1 ? 'is' : 'are'} not in the total.
+              </p>
+            )}
 
             {modelTotals.size > 0 && (
               <div className="usage-model-breakdown">
@@ -177,9 +192,39 @@ export default function UsagePanel({ onClose }: { onClose: () => void }) {
           </>
         )}
 
+        {pricing.length > 0 && (
+          <div className="usage-model-breakdown">
+            <h3 className="usage-section-title">Prices used ($ per million tokens)</h3>
+            <p style={{ color: '#94a3b8', fontSize: '0.72rem', margin: '0 0 4px' }}>
+              Estimates; check anthropic.com/pricing for current prices. Cache writes are 1.25x input (5-minute cache).
+            </p>
+            <table className="usage-table">
+              <thead>
+                <tr><th>Model</th><th>Input</th><th>Output</th><th>Cache read</th><th>Cache write</th></tr>
+              </thead>
+              <tbody>
+                {pricing.map((p) => (
+                  <tr key={p.model} title={p.note}>
+                    <td>{p.label}{p.legacy ? ' (older)' : ''}{p.note ? ' *' : ''}</td>
+                    <td>{p.input}</td>
+                    <td>{p.output}</td>
+                    <td>{p.cacheRead}</td>
+                    <td>{p.cacheWrite}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p style={{ color: '#64748b', fontSize: '0.68rem', margin: '4px 0 0' }}>
+              * {pricing.filter((p) => p.note).map((p) => `${p.label}: ${p.note}`).join('. ')}
+            </p>
+          </div>
+        )}
+
+        {error && <p style={{ color: '#f87171', fontSize: '0.8rem' }}>{error}</p>}
+
         <div className="modal-actions">
           {records.length > 0 && (
-            <button type="button" className="modal-btn small danger" onClick={handleClear}>
+            <button type="button" className="modal-btn small danger" onClick={() => setConfirmingClear(true)}>
               Clear History
             </button>
           )}
@@ -188,6 +233,26 @@ export default function UsagePanel({ onClose }: { onClose: () => void }) {
           </button>
         </div>
       </div>
+
+      {confirmingClear && (
+        // In-app confirmation: explicit buttons only, no backdrop close.
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="usage-clear-title">
+          <div className="modal">
+            <h2 className="modal-title" id="usage-clear-title">Clear usage history?</h2>
+            <p style={{ color: '#cbd5e1', fontSize: '0.85rem' }}>
+              This deletes all {records.length} recorded requests and their costs. It can't be undone.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="modal-btn" onClick={() => setConfirmingClear(false)} autoFocus>
+                Cancel
+              </button>
+              <button type="button" className="modal-btn danger" onClick={handleClear}>
+                Clear History
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

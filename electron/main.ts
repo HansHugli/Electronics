@@ -1,349 +1,430 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
-import { getSetupStatus, downloadCli, installCore, compileSketch } from './arduinoCli';
-import { streamChat, ChatMessage, CircuitContextMode } from './claudeChat';
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, session, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
-const isDev = !app.isPackaged;
+import { getSetupStatus, downloadCli, installCore, compileSketch } from './arduinoCli';
+import { cancelChat, ChatMessage, runChat } from './claudeChat';
+import { closeOpenToolUse, ConversationStore, historyFromPlain, userTurn } from './chatHistory';
+import { AppConfig, CircuitContextMode, ConfigStore } from './config';
+import { autosaveFileName, defaultDataDir, LEGACY_AUTOSAVE_NAME } from './dataPaths';
+import {
+  atomicWriteFileSync,
+  friendlyFsError,
+  isValidCircuitName,
+  isValidTypeId,
+  resolveInside,
+} from './fsSafe';
+import { chooseModel, ModelChoice, normaliseModelSetting } from './modelSelect';
+import { calculateCost, pricingTable } from './pricing';
+import { keyStorageOf, migratePlaintextKey, readApiKey, writeApiKey } from './secrets';
+import { DEV_SERVER_URL, isAppUrl, isSafeExternalUrl } from './security';
+import { UsageRecord, UsageStore } from './usageStore';
 
-// ---- Config & Data Paths ---- //
+// ---- Test isolation ---- //
+// E101_USER_DATA points userData (config, usage, tools) at a scratch folder.
+// It also turns off OneDrive detection, so a test run never touches the real
+// data folder. Must run before anything reads app.getPath('userData').
+const TEST_USER_DATA = process.env.E101_USER_DATA;
+if (TEST_USER_DATA) app.setPath('userData', path.resolve(TEST_USER_DATA));
 
-const CONFIG_FILE = path.join(app.getPath('userData'), 'e101-config.json');
+// E101_PROD=1 loads the built page from dist/ without packaging (for tests).
+const isDev = !app.isPackaged && process.env.E101_PROD !== '1';
+const INDEX_FILE = path.join(__dirname, '../index.html');
+const ORIGIN = { isDev, indexFile: INDEX_FILE };
 
-/**
- * Persistent app config. The Anthropic API key lives here in the userData
- * directory and never leaves the main process — the renderer can ask whether
- * a key is configured (boolean) but never sees the value itself.
- */
-interface AppConfig {
-  dataFilePath: string;
-  apiKey?: string;
-  chatModel?: string;
-  sidebarWidth?: number;
-  circuitContextMode?: CircuitContextMode;
+// ---- Single instance (D4) ---- //
+
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
 }
-
-function getOneDrivePath(): string | null {
-  const home = os.homedir();
-  if (process.platform === 'win32') {
-    const p = path.join(home, 'OneDrive', 'Documents', 'e101');
-    if (fs.existsSync(path.join(home, 'OneDrive'))) return p;
-  } else if (process.platform === 'darwin') {
-    const p = path.join(home, 'Library', 'CloudStorage', 'OneDrive-Personal', 'e101');
-    if (fs.existsSync(path.join(home, 'Library', 'CloudStorage', 'OneDrive-Personal'))) return p;
+app.on('second-instance', () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
   }
-  return null;
+});
+
+// ---- Config & data paths ---- //
+
+const USER_DATA = app.getPath('userData');
+const CONFIG_FILE = path.join(USER_DATA, 'e101-config.json');
+
+function makeDefaultConfig(): AppConfig {
+  const dir = TEST_USER_DATA
+    ? USER_DATA
+    : defaultDataDir(process.env, os.homedir(), process.platform, {
+        exists: (p) => fs.existsSync(p),
+        list: (p) => {
+          try { return fs.readdirSync(p); } catch { return []; }
+        },
+      }, USER_DATA);
+  return { dataFilePath: path.join(dir, 'e101.json') };
 }
 
-function getDefaultDataDir(): string {
-  const oneDrive = getOneDrivePath();
-  if (oneDrive) return oneDrive;
-  return app.getPath('userData');
+const configStore = new ConfigStore(CONFIG_FILE, makeDefaultConfig);
+
+// First run: create the data folder and record it in the config (D5).
+if (configStore.firstRun) {
+  const cfg = configStore.get();
+  try { fs.mkdirSync(path.dirname(cfg.dataFilePath), { recursive: true }); } catch { /* reported below */ }
+  configStore.update(() => { /* writes the resolved path */ });
 }
 
 function loadConfig(): AppConfig {
-  try {
-    if (fs.existsSync(CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-    }
-  } catch {
-    // Ignore corrupt config
+  return configStore.get();
+}
+
+/**
+ * The folder data is read from and written to. When the configured folder
+ * is missing (OneDrive unlinked, a drive not mounted) the app uses userData
+ * and says so, instead of silently switching.
+ */
+function dataDirStatus(): { dataDir: string; ok: boolean; problem?: string } {
+  const configured = path.dirname(loadConfig().dataFilePath);
+  const problems: string[] = [];
+  let dataDir = configured;
+  if (!fs.existsSync(configured)) {
+    dataDir = USER_DATA;
+    problems.push(`Your data folder ${configured} is missing; using the app folder (${USER_DATA}) until it is back.`);
   }
-  return { dataFilePath: path.join(getDefaultDataDir(), 'e101.json') };
+  if (configStore.problem) problems.push(configStore.problem);
+  return { dataDir, ok: problems.length === 0, problem: problems.length ? problems.join(' ') : undefined };
 }
 
-function saveConfig(config: AppConfig) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+function dataDir(): string {
+  return dataDirStatus().dataDir;
 }
 
-// ---- Usage Tracking ---- //
-
-const USAGE_FILE = path.join(app.getPath('userData'), 'e101-usage.json');
-
-interface UsageRecord {
-  timestamp: string;
-  model: string;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  cacheWriteTokens: number;
-  cost: number; // USD
-}
-
-/** Model pricing per million tokens (input / output). */
-const MODEL_PRICING: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
-  'claude-opus-4-6':   { input: 15, output: 75, cacheRead: 1.5,  cacheWrite: 18.75 },
-  'claude-sonnet-4-6': { input: 3,  output: 15, cacheRead: 0.3,  cacheWrite: 3.75  },
-  'claude-haiku-4-5':  { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1     },
-};
-
-function calculateCost(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): number {
-  const pricing = MODEL_PRICING[model] || MODEL_PRICING['claude-sonnet-4-6'];
-  const inputCost = ((usage.inputTokens - usage.cacheReadTokens - usage.cacheWriteTokens) * pricing.input) / 1_000_000;
-  const outputCost = (usage.outputTokens * pricing.output) / 1_000_000;
-  const cacheReadCost = (usage.cacheReadTokens * pricing.cacheRead) / 1_000_000;
-  const cacheWriteCost = (usage.cacheWriteTokens * pricing.cacheWrite) / 1_000_000;
-  return Math.max(0, inputCost) + outputCost + cacheReadCost + cacheWriteCost;
-}
-
-function loadUsageRecords(): UsageRecord[] {
-  try {
-    if (fs.existsSync(USAGE_FILE)) {
-      return JSON.parse(fs.readFileSync(USAGE_FILE, 'utf-8'));
-    }
-  } catch { /* ignore */ }
-  return [];
-}
-
-function saveUsageRecords(records: UsageRecord[]) {
-  fs.writeFileSync(USAGE_FILE, JSON.stringify(records, null, 2), 'utf-8');
-}
-
-function ensureDir(filePath: string) {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-// ---- Circuits Directory ---- //
-
-function getCircuitsDir(): string {
-  const config = loadConfig();
-  const dir = path.join(path.dirname(config.dataFilePath), 'circuits');
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+function ensureDirOf(dir: string): string {
+  fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
+function getCircuitsDir(): string {
+  return ensureDirOf(path.join(dataDir(), 'circuits'));
+}
+
+function getChipsDir(): string {
+  return path.join(dataDir(), 'chips');
+}
+
 const ECX_FILTER = { name: 'E101 Circuit', extensions: ['ecx'] };
+const MAX_CIRCUIT_BYTES = 50 * 1024 * 1024;
 
-// ---- IPC Handlers ---- //
+function requireString(value: unknown, what: string, max = MAX_CIRCUIT_BYTES): string {
+  if (typeof value !== 'string') throw new Error(`The ${what} is missing.`);
+  if (value.length > max) throw new Error(`The ${what} is too large.`);
+  return value;
+}
 
-ipcMain.handle('save-circuit', async (_event, data: string, currentPath?: string) => {
-  const win = BrowserWindow.getFocusedWindow();
+function readTextFile(filePath: string, max = MAX_CIRCUIT_BYTES): string {
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size > max) throw Object.assign(new Error('too large'), { code: 'EFBIG' });
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EFBIG') {
+      throw new Error(`Could not open "${path.basename(filePath)}": the file is too large.`);
+    }
+    throw friendlyFsError('open', filePath, err);
+  }
+}
+
+function writeTextFile(filePath: string, data: string, backup = false) {
+  try {
+    atomicWriteFileSync(filePath, data, { backup });
+  } catch (err) {
+    throw friendlyFsError('save', filePath, err);
+  }
+}
+
+// ---- Usage tracking ---- //
+
+const usageStore = new UsageStore(path.join(USER_DATA, 'e101-usage.json'));
+
+function recordUsage(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }, cost: number | null, rounds: number): UsageRecord {
+  const entry: UsageRecord = {
+    timestamp: new Date().toISOString(),
+    model,
+    ...usage,
+    cost,
+    rounds,
+    pricingVersion: 2,
+  };
+  try {
+    usageStore.append(entry);
+  } catch (err) {
+    console.error('Could not write the usage file:', (err as Error).message);
+  }
+  return entry;
+}
+
+// ---- IPC trust (S1) ---- //
+
+function isTrustedEvent(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean {
+  const frame = event.senderFrame;
+  if (!frame || frame.parent !== null) return false;
+  return isAppUrl(frame.url, ORIGIN);
+}
+
+type Handler = (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown;
+
+/** ipcMain.handle that refuses calls from any page other than ours. */
+function handle(channel: string, fn: Handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isTrustedEvent(event)) throw new Error('This request came from an untrusted page and was blocked.');
+    return fn(event, ...args);
+  });
+}
+
+function windowOf(event: Electron.IpcMainInvokeEvent): BrowserWindow | null {
+  return BrowserWindow.fromWebContents(event.sender);
+}
+
+// ---- Circuits ---- //
+
+handle('save-circuit', async (event, data, currentPath) => {
+  const text = requireString(data, 'circuit');
+  const win = windowOf(event);
   if (!win) return null;
-
   const dir = getCircuitsDir();
-  ensureDir(path.join(dir, 'dummy'));
-
   const result = await dialog.showSaveDialog(win, {
     title: 'Save Circuit',
-    defaultPath: currentPath || path.join(dir, 'untitled.ecx'),
+    defaultPath: typeof currentPath === 'string' && currentPath ? currentPath : path.join(dir, 'untitled.ecx'),
     filters: [ECX_FILTER],
   });
-
   if (result.canceled || !result.filePath) return null;
-
-  fs.writeFileSync(result.filePath, data, 'utf-8');
-  const name = path.basename(result.filePath, '.ecx');
-  return { filePath: result.filePath, name };
+  writeTextFile(result.filePath, text);
+  return { filePath: result.filePath, name: path.basename(result.filePath, '.ecx') };
 });
 
-ipcMain.handle('load-circuit', async () => {
-  const win = BrowserWindow.getFocusedWindow();
+handle('load-circuit', async (event) => {
+  const win = windowOf(event);
   if (!win) return null;
-
-  const dir = getCircuitsDir();
-
   const result = await dialog.showOpenDialog(win, {
     title: 'Open Circuit',
-    defaultPath: dir,
+    defaultPath: getCircuitsDir(),
     filters: [ECX_FILTER],
     properties: ['openFile'],
   });
-
   if (result.canceled || result.filePaths.length === 0) return null;
-
   const filePath = result.filePaths[0];
-  const data = fs.readFileSync(filePath, 'utf-8');
-  const name = path.basename(filePath, '.ecx');
-  return { filePath, name, data };
+  const data = readTextFile(filePath);
+  return { filePath, name: path.basename(filePath, '.ecx'), data };
 });
-
-ipcMain.handle('get-config', () => {
-  // Strip the API key before sending the config to the renderer — the
-  // renderer only needs to know whether one is configured, not its value.
-  const cfg = loadConfig();
-  const { apiKey, ...safe } = cfg;
-  return { ...safe, hasApiKey: !!apiKey };
-});
-
-// ---- Claude Chat config ---- //
-//
-// The API key never leaves the main process. The renderer can set/clear it
-// and check whether one is configured, but cannot read it back.
-
-ipcMain.handle('chat-set-api-key', (_event, apiKey: string) => {
-  const cfg = loadConfig();
-  cfg.apiKey = apiKey.trim() || undefined;
-  saveConfig(cfg);
-  return { hasApiKey: !!cfg.apiKey };
-});
-
-ipcMain.handle('chat-clear-api-key', () => {
-  const cfg = loadConfig();
-  delete cfg.apiKey;
-  saveConfig(cfg);
-  return { hasApiKey: false };
-});
-
-ipcMain.handle('chat-set-model', (_event, model: string) => {
-  const cfg = loadConfig();
-  cfg.chatModel = model;
-  saveConfig(cfg);
-  return cfg.chatModel;
-});
-
-ipcMain.handle('chat-set-circuit-mode', (_event, mode: CircuitContextMode) => {
-  const cfg = loadConfig();
-  cfg.circuitContextMode = mode;
-  saveConfig(cfg);
-  return cfg.circuitContextMode;
-});
-
-// ---- Usage Tracking IPC ---- //
-
-ipcMain.handle('usage-record', (_event, record: { model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }) => {
-  const cost = calculateCost(record.model, record);
-  const entry: UsageRecord = {
-    timestamp: new Date().toISOString(),
-    model: record.model,
-    inputTokens: record.inputTokens,
-    outputTokens: record.outputTokens,
-    cacheReadTokens: record.cacheReadTokens,
-    cacheWriteTokens: record.cacheWriteTokens,
-    cost,
-  };
-  const records = loadUsageRecords();
-  records.push(entry);
-  saveUsageRecords(records);
-  return entry;
-});
-
-ipcMain.handle('usage-get', () => {
-  return loadUsageRecords();
-});
-
-ipcMain.handle('usage-clear', () => {
-  saveUsageRecords([]);
-  return [];
-});
-
-ipcMain.handle('chat-set-sidebar-width', (_event, width: number) => {
-  const cfg = loadConfig();
-  cfg.sidebarWidth = Math.max(240, Math.min(720, Math.round(width)));
-  saveConfig(cfg);
-  return cfg.sidebarWidth;
-});
-
-// Streaming chat send. We don't return the result through invoke — instead
-// the main process pumps token deltas back via webContents.send so the
-// renderer can render them as they arrive. This handler resolves
-// immediately with an ack; completion is signalled via chat-stream-done.
-ipcMain.handle(
-  'chat-send',
-  async (
-    event,
-    payload: {
-      requestId: string;
-      messages: ChatMessage[];
-      circuitContext: string;
-      componentCatalog: string;
-    },
-  ) => {
-    const cfg = loadConfig();
-    if (!cfg.apiKey) {
-      event.sender.send('chat-stream-error', {
-        requestId: payload.requestId,
-        kind: 'no_key',
-        message: 'No Anthropic API key configured. Add one in Settings.',
-      });
-      return { started: false };
-    }
-    // Fire and forget — streamChat handles its own errors and pushes them
-    // back over IPC. Awaiting it here would block the invoke return, which
-    // we want to ack quickly so the UI can mark the request in-flight.
-    void streamChat(event.sender, {
-      apiKey: cfg.apiKey,
-      model: cfg.chatModel || 'claude-opus-4-6',
-      messages: payload.messages,
-      circuitContext: payload.circuitContext,
-      componentCatalog: payload.componentCatalog,
-      requestId: payload.requestId,
-    });
-    return { started: true };
-  },
-);
 
 // Save a named circuit to the circuits folder (used for bootstrapping demos)
-ipcMain.handle('save-demo', async (_event, name: string, data: string) => {
-  const dir = getCircuitsDir();
-  const filePath = path.join(dir, `${name}.ecx`);
-  fs.writeFileSync(filePath, data, 'utf-8');
+handle('save-demo', async (_event, name, data) => {
+  if (!isValidCircuitName(name)) throw new Error('That circuit name contains characters that are not allowed in a file name.');
+  const text = requireString(data, 'circuit');
+  const filePath = resolveInside(getCircuitsDir(), `${name}.ecx`);
+  writeTextFile(filePath, text);
   return filePath;
 });
 
 // Load a named circuit from the circuits folder
-ipcMain.handle('load-named-circuit', async (_event, name: string) => {
-  const dir = getCircuitsDir();
-  const filePath = path.join(dir, `${name}.ecx`);
+handle('load-named-circuit', async (_event, name) => {
+  if (!isValidCircuitName(name)) throw new Error('That circuit name contains characters that are not allowed in a file name.');
+  const filePath = resolveInside(getCircuitsDir(), `${name}.ecx`);
   if (!fs.existsSync(filePath)) return null;
-  const data = fs.readFileSync(filePath, 'utf-8');
-  return { filePath, name, data };
+  return { filePath, name, data: readTextFile(filePath) };
 });
 
-ipcMain.handle('get-version', () => {
-  return app.getVersion();
+// ---- Config ---- //
+
+handle('get-config', () => {
+  // Only safe fields: the API key (plain or encrypted) never reaches the renderer.
+  const cfg = loadConfig();
+  return {
+    dataFilePath: cfg.dataFilePath,
+    hasApiKey: keyStorageOf(cfg) !== 'none',
+    keyStorage: keyStorageOf(cfg),
+    chatModel: normaliseModelSetting(cfg.chatModel),
+    sidebarWidth: cfg.sidebarWidth,
+    circuitContextMode: cfg.circuitContextMode,
+  };
 });
 
-ipcMain.on('set-title', (_event, title: string) => {
-  const win = BrowserWindow.getFocusedWindow();
-  if (win) win.setTitle(title);
+handle('app:get-data-status', () => dataDirStatus());
+
+handle('chat-set-api-key', (_event, apiKey) => {
+  if (typeof apiKey !== 'string' || apiKey.length > 500) throw new Error('That API key is not valid.');
+  const cfg = configStore.update((c) => writeApiKey(c, apiKey, safeStorage), { scrubBackup: true });
+  return { hasApiKey: keyStorageOf(cfg) !== 'none' };
+});
+
+handle('chat-clear-api-key', () => {
+  configStore.update((c) => writeApiKey(c, undefined, safeStorage), { scrubBackup: true });
+  return { hasApiKey: false };
+});
+
+handle('chat-set-model', (_event, model) => {
+  const setting = normaliseModelSetting(typeof model === 'string' ? model : undefined);
+  configStore.update((c) => { c.chatModel = setting; });
+  return setting;
+});
+
+handle('chat-set-circuit-mode', (_event, mode) => {
+  if (mode !== 'always' && mode !== 'on-change' && mode !== 'never') throw new Error('Unknown circuit context mode.');
+  configStore.update((c) => { c.circuitContextMode = mode as CircuitContextMode; });
+  return mode;
+});
+
+handle('chat-set-sidebar-width', (_event, width) => {
+  const w = typeof width === 'number' && Number.isFinite(width) ? width : 320;
+  const cfg = configStore.update((c) => { c.sidebarWidth = Math.max(240, Math.min(720, Math.round(w))); });
+  return cfg.sidebarWidth;
+});
+
+// ---- Usage ---- //
+
+// Kept for compatibility: the chat now records usage in main itself.
+handle('usage-record', (_event, record) => {
+  const r = (record ?? {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+  const model = typeof r.model === 'string' ? r.model.slice(0, 80) : 'unknown';
+  const usage = {
+    inputTokens: num(r.inputTokens),
+    outputTokens: num(r.outputTokens),
+    cacheReadTokens: num(r.cacheReadTokens),
+    cacheWriteTokens: num(r.cacheWriteTokens),
+  };
+  return recordUsage(model, usage, calculateCost(model, usage), 1);
+});
+
+handle('usage-get', () => usageStore.load());
+
+handle('usage-clear', () => {
+  usageStore.clear();
+  return [];
+});
+
+handle('usage-pricing', () => pricingTable());
+
+// ---- Claude chat ---- //
+
+const conversations = new ConversationStore();
+const modelChoices = new Map<string, ModelChoice>();
+const REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+const MAX_CONTEXT_CHARS = 200_000;
+
+handle('chat-send', async (event, rawPayload) => {
+  const payload = (rawPayload ?? {}) as {
+    requestId?: unknown;
+    conversationId?: unknown;
+    messages?: unknown;
+    circuitContext?: unknown;
+    componentCatalog?: unknown;
+  };
+  if (typeof payload.requestId !== 'string' || !REQUEST_ID_RE.test(payload.requestId)) {
+    throw new Error('Invalid chat request.');
+  }
+  const requestId = payload.requestId;
+  const messages: ChatMessage[] = Array.isArray(payload.messages)
+    ? (payload.messages as ChatMessage[]).filter(
+        (m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string',
+      )
+    : [];
+  const circuitContext = typeof payload.circuitContext === 'string' ? payload.circuitContext.slice(0, MAX_CONTEXT_CHARS) : '';
+  const componentCatalog = typeof payload.componentCatalog === 'string' ? payload.componentCatalog.slice(0, MAX_CONTEXT_CHARS) : '';
+  const userText = [...messages].reverse().find((m) => m.role === 'user')?.content ?? '';
+
+  const apiKey = readApiKey(loadConfig(), safeStorage);
+  if (!apiKey) {
+    event.sender.send('chat-stream-error', {
+      requestId,
+      kind: 'no_key',
+      message: 'No Anthropic API key is set. Add one in Settings.',
+    });
+    return { started: false };
+  }
+  if (!userText.trim()) throw new Error('The message is empty.');
+
+  // Main keeps each conversation's full content blocks (W4).
+  const conversationId =
+    typeof payload.conversationId === 'string' && REQUEST_ID_RE.test(payload.conversationId) ? payload.conversationId : null;
+  let conversation;
+  if (conversationId) {
+    conversation = conversations.get(conversationId);
+    conversation.messages = closeOpenToolUse(conversation.messages);
+    conversation.messages.push(userTurn(userText, circuitContext));
+  } else {
+    conversation = { id: requestId, messages: historyFromPlain(messages, circuitContext), updated: Date.now() };
+  }
+
+  // One model per conversation (U3): only a dropdown change switches it.
+  const key = conversationId ?? requestId;
+  const choice = chooseModel(loadConfig().chatModel, modelChoices.get(key), userText);
+  modelChoices.set(key, choice);
+
+  void runChat(event.sender, {
+    apiKey,
+    choice,
+    conversation,
+    componentCatalog,
+    requestId,
+    onUsage: (model, usage, cost, rounds) => {
+      recordUsage(model, usage, cost, rounds);
+    },
+    isTrustedSender: (e) => isTrustedEvent(e),
+  });
+  return { started: true };
+});
+
+handle('chat-cancel', (_event, requestId) => {
+  return typeof requestId === 'string' ? cancelChat(requestId) : false;
+});
+
+handle('chat-reset-conversation', (_event, conversationId) => {
+  if (typeof conversationId === 'string') {
+    conversations.delete(conversationId);
+    modelChoices.delete(conversationId);
+  }
+  return true;
+});
+
+handle('get-version', () => app.getVersion());
+
+ipcMain.on('set-title', (event, title: unknown) => {
+  if (!isTrustedEvent(event) || typeof title !== 'string') return;
+  BrowserWindow.fromWebContents(event.sender)?.setTitle(title.slice(0, 200));
 });
 
 // ---- Arduino CLI ---- //
 
-ipcMain.handle('arduino-status', () => {
-  return getSetupStatus();
-});
+handle('arduino-status', () => getSetupStatus());
 
-ipcMain.handle('arduino-setup', async () => {
+handle('arduino-setup', async () => {
   try {
     const status = getSetupStatus();
     const messages: string[] = [];
-    if (!status.cliInstalled) {
-      const msg = await downloadCli();
-      messages.push(msg);
-    }
-    if (!status.coreInstalled) {
-      const msg = await installCore();
-      messages.push(msg);
-    }
+    if (!status.cliInstalled) messages.push(await downloadCli());
+    if (!status.coreInstalled) messages.push(await installCore());
     return { success: true, messages };
   } catch (err: unknown) {
     const e = err as { message?: string; stderr?: string };
-    const detail = e.stderr || e.message || 'Unknown error during setup';
-    return { success: false, error: detail };
+    return { success: false, error: e.stderr || e.message || 'Unknown error during setup' };
   }
 });
 
-ipcMain.handle('arduino-compile', async (_event, sketchCode: string) => {
+handle('arduino-compile', async (_event, sketchCode) => {
   try {
-    const result = await compileSketch(sketchCode);
+    const result = await compileSketch(requireString(sketchCode, 'sketch', 1_000_000));
     return { success: true, hex: result.hex, output: result.output };
   } catch (err: unknown) {
-    const e = err as { message?: string };
-    return { success: false, error: e.message || 'Compilation failed' };
+    return { success: false, error: (err as Error).message || 'Compilation failed' };
   }
 });
 
-// Open a native file picker for an .ino file. Returns the absolute path so
-// the renderer can later write the compiled .hex next to it.
-ipcMain.handle('arduino-open-sketch', async () => {
-  const win = BrowserWindow.getFocusedWindow();
+/** Sketch files the user opened through the dialog: the only places a .hex may be written next to. */
+const openedSketches = new Set<string>();
+
+handle('arduino-open-sketch', async (event) => {
+  const win = windowOf(event);
   if (!win) return null;
   const result = await dialog.showOpenDialog(win, {
     title: 'Open Arduino Sketch',
@@ -352,35 +433,32 @@ ipcMain.handle('arduino-open-sketch', async () => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   const filePath = result.filePaths[0];
-  const data = fs.readFileSync(filePath, 'utf-8');
+  const data = readTextFile(filePath, 1_000_000);
+  openedSketches.add(path.resolve(filePath));
   return { filePath, name: path.basename(filePath), data };
 });
 
-// Write a compiled hex string next to the source .ino — used to cache the
-// hex on disk so the user can later load it directly via "Load .hex" without
-// re-running the sketch editor compile flow.
-ipcMain.handle('arduino-save-hex', async (_event, sketchFilePath: string, hexContent: string) => {
+const HEX_RE = /^(:[0-9A-Fa-f]{10,}\s*)+$/;
+
+// Write a compiled hex next to an .ino the user opened in this session.
+handle('arduino-save-hex', async (_event, sketchFilePath, hexContent) => {
   try {
-    const dir = path.dirname(sketchFilePath);
-    const base = path.basename(sketchFilePath, path.extname(sketchFilePath));
-    const hexPath = path.join(dir, `${base}.hex`);
-    fs.writeFileSync(hexPath, hexContent, 'utf-8');
+    if (typeof sketchFilePath !== 'string' || !openedSketches.has(path.resolve(sketchFilePath))) {
+      return { success: false, error: 'The .hex can only be saved next to a sketch you opened with Open Sketch.' };
+    }
+    const hex = requireString(hexContent, 'hex file', 4_000_000);
+    if (!HEX_RE.test(hex.trim())) return { success: false, error: 'The compiled output is not a valid Intel HEX file.' };
+    const resolved = path.resolve(sketchFilePath);
+    const hexPath = path.join(path.dirname(resolved), `${path.basename(resolved, path.extname(resolved))}.hex`);
+    writeTextFile(hexPath, hex);
     return { success: true, hexPath };
   } catch (err: unknown) {
-    const e = err as { message?: string };
-    return { success: false, error: e.message || 'Failed to save hex' };
+    return { success: false, error: (err as Error).message || 'Failed to save hex' };
   }
 });
 
-// ---- Chip Definitions ---- //
-
-function getChipsDir(): string {
-  const config = loadConfig();
-  return path.join(path.dirname(config.dataFilePath), 'chips');
-}
-
-ipcMain.handle('load-hex', async () => {
-  const win = BrowserWindow.getFocusedWindow();
+handle('load-hex', async (event) => {
+  const win = windowOf(event);
   if (!win) return null;
   const result = await dialog.showOpenDialog(win, {
     title: 'Load AVR Hex File',
@@ -389,85 +467,185 @@ ipcMain.handle('load-hex', async () => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
   const filePath = result.filePaths[0];
-  const data = fs.readFileSync(filePath, 'utf-8');
-  const name = path.basename(filePath);
-  return { filePath, name, data };
+  return { filePath, name: path.basename(filePath), data: readTextFile(filePath, 4_000_000) };
 });
 
-ipcMain.handle('load-chips', async () => {
+// ---- Chip definitions ---- //
+
+handle('load-chips', async () => {
   const dir = getChipsDir();
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
     return [];
   }
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
   const chips: unknown[] = [];
-  for (const file of files) {
+  for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.json'))) {
     try {
-      const data = fs.readFileSync(path.join(dir, file), 'utf-8');
-      const parsed = JSON.parse(data);
-      if (parsed.type && parsed.pins) {
-        chips.push(parsed);
-      }
+      const parsed = JSON.parse(readTextFile(path.join(dir, file), 1_000_000));
+      if (parsed && typeof parsed.type === 'string' && Array.isArray(parsed.pins)) chips.push(parsed);
     } catch {
-      // Skip invalid files
+      // Skip invalid files; one bad file must not stop the others.
     }
   }
   return chips;
 });
 
-// Delete a chip definition JSON from the chips directory
-ipcMain.handle('delete-chip', async (_event, typeId: string) => {
-  const dir = getChipsDir();
-  const filePath = path.join(dir, `${typeId}.json`);
-  if (fs.existsSync(filePath)) {
+handle('delete-chip', async (_event, typeId) => {
+  if (!isValidTypeId(typeId)) return { success: false, message: 'Invalid component type ID.' };
+  const filePath = resolveInside(getChipsDir(), `${typeId}.json`);
+  if (!fs.existsSync(filePath)) return { success: false, message: 'File not found' };
+  try {
     fs.unlinkSync(filePath);
-    return { success: true };
+  } catch (err) {
+    throw friendlyFsError('delete', filePath, err);
   }
-  return { success: false, message: 'File not found' };
+  return { success: true };
 });
 
-// Save a chip definition JSON to the chips directory (used by AI create_component_type)
-ipcMain.handle('save-chip', async (_event, chipJson: unknown) => {
-  const dir = getChipsDir();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+handle('save-chip', async (_event, chipJson) => {
+  const chip = chipJson as { type?: unknown } | null;
+  if (!chip || typeof chip !== 'object' || !isValidTypeId(chip.type)) {
+    throw new Error('The component type ID must be lowercase letters, digits, "_" or "-", starting with a letter.');
   }
-  const chip = chipJson as { type: string };
-  const filePath = path.join(dir, `${chip.type}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(chipJson, null, 2), 'utf-8');
+  const text = JSON.stringify(chipJson, null, 2);
+  if (text.length > 500_000) throw new Error('The component definition is too large.');
+  const filePath = resolveInside(ensureDirOf(getChipsDir()), `${chip.type}.json`);
+  writeTextFile(filePath, text);
   return filePath;
 });
 
-// ---- Autosave ---- //
+// ---- Autosave (D2, D4) ---- //
 
-function getAutosavePath(): string {
-  const config = loadConfig();
-  return path.join(path.dirname(config.dataFilePath), 'autosave.ecx');
+let autosaveRestored = false;
+
+function autosavePath(): string {
+  return path.join(dataDir(), autosaveFileName(os.hostname()));
 }
 
-ipcMain.handle('autosave', async (_event, data: string) => {
-  const filePath = getAutosavePath();
-  ensureDir(filePath);
-  fs.writeFileSync(filePath, data, 'utf-8');
+function isEmptyCircuit(text: string): boolean {
+  try {
+    const c = JSON.parse(text);
+    return !(c?.components?.length > 0 || c?.wires?.length > 0);
+  } catch {
+    return false;
+  }
+}
+
+handle('autosave', async (_event, data) => {
+  const text = requireString(data, 'autosave');
+  const filePath = autosavePath();
+  // Until the renderer has read the last session back, never replace a
+  // non-empty autosave with an empty board (a slow start could wipe it).
+  if (!autosaveRestored && isEmptyCircuit(text) && fs.existsSync(filePath)) {
+    try {
+      if (!isEmptyCircuit(fs.readFileSync(filePath, 'utf-8'))) return filePath;
+    } catch { /* fall through and write */ }
+  }
+  ensureDirOf(path.dirname(filePath));
+  writeTextFile(filePath, text, true);
   return filePath;
 });
 
-ipcMain.handle('load-autosave', async () => {
-  const filePath = getAutosavePath();
-  if (!fs.existsSync(filePath)) return null;
+handle('load-autosave', async () => {
+  const dir = dataDir();
+  const candidates = [autosavePath(), path.join(dir, LEGACY_AUTOSAVE_NAME)];
   try {
-    const data = fs.readFileSync(filePath, 'utf-8');
-    return { data };
+    for (const file of candidates) {
+      if (!fs.existsSync(file)) continue;
+      const data = readTextFile(file);
+      try {
+        JSON.parse(data);
+        return { data };
+      } catch {
+        // Damaged: try its backup before giving up on this candidate.
+        const bak = `${file}.bak`;
+        if (fs.existsSync(bak)) {
+          const backup = readTextFile(bak);
+          JSON.parse(backup);
+          return { data: backup };
+        }
+      }
+    }
+    return null;
   } catch {
     return null;
+  } finally {
+    autosaveRestored = true;
   }
 });
 
 // ---- Window ---- //
 
+let mainWindow: BrowserWindow | null = null;
+
+function setupCloseGuard(win: BrowserWindow) {
+  let allowClose = false;
+  let ackTimer: NodeJS.Timeout | null = null;
+  let acked = false;
+
+  const reallyClose = () => {
+    allowClose = true;
+    if (ackTimer) clearTimeout(ackTimer);
+    if (!win.isDestroyed()) win.close();
+  };
+
+  win.on('close', (e) => {
+    if (allowClose) return;
+    const wc = win.webContents;
+    if (wc.isDestroyed() || wc.isCrashed()) return; // nothing to ask
+    e.preventDefault();
+    acked = false;
+    wc.send('app:close-request');
+    if (ackTimer) clearTimeout(ackTimer);
+    // The preload answers at once when a handler is listening; if nothing
+    // answers within 5 s (crashed, hung, no handler) the window closes.
+    ackTimer = setTimeout(() => {
+      if (!acked) reallyClose();
+    }, 5000);
+  });
+
+  const onAck = (event: Electron.IpcMainEvent) => {
+    if (event.sender === win.webContents && isTrustedEvent(event)) {
+      acked = true;
+      if (ackTimer) clearTimeout(ackTimer);
+    }
+  };
+  const onConfirm = (event: Electron.IpcMainEvent) => {
+    if (event.sender === win.webContents && isTrustedEvent(event)) reallyClose();
+  };
+  ipcMain.on('app:close-request-ack', onAck);
+  ipcMain.on('app:confirm-close', onConfirm);
+  win.on('closed', () => {
+    if (ackTimer) clearTimeout(ackTimer);
+    ipcMain.removeListener('app:close-request-ack', onAck);
+    ipcMain.removeListener('app:confirm-close', onConfirm);
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error('Renderer gone:', details.reason);
+    allowClose = true;
+  });
+}
+
+function hardenWebContents(win: BrowserWindow) {
+  const wc = win.webContents;
+  // Never navigate the app window away from the app (S1).
+  wc.on('will-navigate', (e, url) => {
+    if (isAppUrl(url, ORIGIN)) return;
+    e.preventDefault();
+    if (isSafeExternalUrl(url)) void shell.openExternal(url);
+  });
+  wc.on('will-redirect', (e, url) => {
+    if (!isAppUrl(url, ORIGIN)) e.preventDefault();
+  });
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalUrl(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  wc.on('will-attach-webview', (e) => e.preventDefault());
+}
+
 function createMainWindow() {
-  const mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 1200,
     height: 820,
     minWidth: 900,
@@ -476,24 +654,45 @@ function createMainWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
     },
+  });
+  mainWindow = win;
+  hardenWebContents(win);
+  setupCloseGuard(win);
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
   });
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5174');
+    void win.loadURL(DEV_SERVER_URL);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../index.html'));
+    void win.loadFile(INDEX_FILE);
   }
 
-  // Application menu
+  const send = (action: string) => win.webContents.send('menu-action', action);
   const isMac = process.platform === 'darwin';
+  const viewMenu: Electron.MenuItemConstructorOptions[] = [
+    ...(isDev
+      ? [
+          { label: 'Toggle Developer Tools', accelerator: 'CmdOrCtrl+Shift+I', click: () => win.webContents.toggleDevTools() },
+          { type: 'separator' as const },
+        ]
+      : []),
+    { role: 'resetZoom' },
+    { role: 'zoomIn' },
+    { role: 'zoomOut' },
+    { type: 'separator' },
+    { role: 'togglefullscreen' },
+  ];
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' as const }] : []),
     {
       label: 'File',
       submenu: [
-        { label: 'Save\tCtrl+S', click: () => mainWindow.webContents.send('menu-action', 'save') },
-        { label: 'Open\tCtrl+O', click: () => mainWindow.webContents.send('menu-action', 'open') },
+        { label: 'Save\tCtrl+S', click: () => send('save') },
+        { label: 'Open\tCtrl+O', click: () => send('open') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
@@ -501,44 +700,49 @@ function createMainWindow() {
     {
       label: 'Edit',
       submenu: [
-        { label: 'Undo\tCtrl+Z', click: () => mainWindow.webContents.send('menu-action', 'undo') },
-        { label: 'Redo\tCtrl+Shift+Z', click: () => mainWindow.webContents.send('menu-action', 'redo') },
+        { label: 'Undo\tCtrl+Z', click: () => send('undo') },
+        { label: 'Redo\tCtrl+Shift+Z', click: () => send('redo') },
         { type: 'separator' },
-        { label: 'Copy\tCtrl+C', click: () => mainWindow.webContents.send('menu-action', 'copy') },
-        { label: 'Paste\tCtrl+V', click: () => mainWindow.webContents.send('menu-action', 'paste') },
+        { label: 'Copy\tCtrl+C', click: () => send('copy') },
+        { label: 'Paste\tCtrl+V', click: () => send('paste') },
       ],
     },
-    {
-      label: 'View',
-      submenu: [
-        { label: 'Toggle Developer Tools', accelerator: 'CmdOrCtrl+Shift+I', click: () => mainWindow.webContents.toggleDevTools() },
-        { type: 'separator' },
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' },
-      ],
-    },
+    { label: 'View', submenu: viewMenu },
     {
       label: 'Help',
       submenu: [
-        { label: 'About E101', click: () => mainWindow.webContents.send('menu-action', 'about') },
-        { label: 'Settings', click: () => mainWindow.webContents.send('menu-action', 'settings') },
+        { label: 'About E101', click: () => send('about') },
+        { label: 'Settings', click: () => send('settings') },
       ],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.whenReady().then(() => {
-  createMainWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
+if (gotLock) {
+  app.whenReady().then(() => {
+    // Encrypt a legacy plaintext API key once (S3); needs the app to be ready.
+    try {
+      const cfg = configStore.get();
+      if (migratePlaintextKey(cfg, safeStorage)) {
+        configStore.update((c) => {
+          c.apiKeyEnc = cfg.apiKeyEnc;
+          delete c.apiKey;
+        }, { scrubBackup: true });
+      }
+    } catch (err) {
+      console.error('API key migration failed:', (err as Error).message);
     }
+
+    // The app needs no browser permissions (camera, notifications, ...).
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === 'clipboard-sanitized-write' || permission === 'fullscreen'));
+
+    createMainWindow();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+    });
   });
-});
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
