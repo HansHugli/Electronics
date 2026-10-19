@@ -20,6 +20,11 @@ function cloneSnapshot(components: PlacedComponent[], wires: Wire[]): Snapshot {
   };
 }
 
+/** The circuit as the user built it: no live simulation readings (`state`). */
+function circuitKey(components: PlacedComponent[], wires: Wire[]): string {
+  return JSON.stringify([components.map(({ state: _state, ...c }) => c), wires]);
+}
+
 /**
  * The undo stack as plain logic (no React), so it can be tested directly.
  * Every entry is the circuit *after* an action; the first entry is the state
@@ -33,6 +38,10 @@ export class HistoryStack {
   private savedId: number | null = null;
 
   push(components: PlacedComponent[], wires: Wire[]): void {
+    // A snapshot of the circuit that is already on top adds an Undo step that changes
+    // nothing (the AI handler pushes the pre-batch state, which is usually the top).
+    const top = this.stack[this.pointer];
+    if (top && circuitKey(top.components, top.wires) === circuitKey(components, wires)) return;
     const entry: Entry = { ...cloneSnapshot(components, wires), id: this.nextId++ };
     this.stack = this.stack.slice(0, this.pointer + 1);
     this.stack.push(entry);

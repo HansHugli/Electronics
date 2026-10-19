@@ -37,6 +37,22 @@ describe('HistoryStack', () => {
     expect(h.undo()?.components.map((c) => c.id)).toEqual(['restored']);
   });
 
+  it('an AI batch is exactly one Undo step, even though it pushes the state before it', () => {
+    const h = new HistoryStack();
+    h.reset([part('a')], []);
+    h.push([part('a')], []); // the AI handler pushes the pre-batch state: already on top
+    h.push([part('a'), part('b')], [wire('w1')]); // the batch's result
+    expect(h.undo()?.components.map((c) => c.id)).toEqual(['a']);
+    expect(h.canUndo()).toBe(false);
+  });
+
+  it('ignores live simulation readings when comparing with the top entry', () => {
+    const h = new HistoryStack();
+    h.reset([part('a')], []);
+    h.push([{ ...part('a'), state: { voltage: 3.2 } }], []);
+    expect(h.canUndo()).toBe(false);
+  });
+
   it('a new action drops the redo branch', () => {
     const h = new HistoryStack();
     h.reset([], []);
