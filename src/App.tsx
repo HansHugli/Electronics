@@ -5,6 +5,7 @@ import { GRID_W, GRID_H, BOARD_X_OFFSET } from './data/breadboard';
 import { createBlinkDemoCircuit, createCounterDemoCircuit, createAVRBlinkDemoCircuit, createMatrixDemoCircuit, createNecklaceDemoCircuit, AVR_BLINK_HEX, AVR_MATRIX_HEX, AVR_NECKLACE_HEX } from './engine/simulation';
 import { CircuitSimulator } from './engine/CircuitSimulator';
 import { useHistory } from './hooks/useHistory';
+import { useSimulationLoop } from './hooks/useSimulationLoop';
 import { loadExternalChips, chipJSONToDefinition } from './data/chipLoader';
 import type { ChipDefinitionJSON } from './data/chipLoader';
 import Sidebar from './components/Sidebar';
@@ -200,45 +201,32 @@ function App() {
     };
   }, [sidebarResizing, sidebarWidth]);
 
-  // Simulation loop — simple setInterval with tick guard
-  const simIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Simulation loop — paced by wall-clock time (useSimulationLoop): each frame
+  // advances the circuit by elapsed wall time × speed, with automatic
+  // sub-stepping inside the engine. The tick runs outside React updaters.
   const wiresRef = useRef(wires);
   wiresRef.current = wires;
+  const simComponentsRef = useRef(components);
+  simComponentsRef.current = components;
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+  simulator.current.scopeProbeIds = scope.probedIds;
 
-  useEffect(() => {
-    // Clear any existing interval first (guards against StrictMode double-mount)
-    if (simIntervalRef.current) {
-      clearInterval(simIntervalRef.current);
-      simIntervalRef.current = null;
-    }
-    if (simRunning) {
-      const tickMs = Math.round(100 / simSpeed);
-      simIntervalRef.current = setInterval(() => {
-        setSimTime((prev) => {
-          const next = prev + 100;
-          simulator.current.subSteps = simAccuracy;
-          setComponents((comps) => {
-            const states = simulator.current.tick(comps, wiresRef.current, next, 0.1);
-            const updated = comps.map((comp) => {
-              const newState = states.get(comp.id);
-              return newState ? { ...comp, state: newState } : comp;
-            });
-            scopeRef.current.recordTick(updated, next);
-            return updated;
-          });
-          return next;
-        });
-      }, tickMs);
-    }
-    return () => {
-      if (simIntervalRef.current) {
-        clearInterval(simIntervalRef.current);
-        simIntervalRef.current = null;
-      }
-    };
-  }, [simRunning, simSpeed, simAccuracy]);
+  const simClock = useSimulationLoop({
+    running: simRunning,
+    speed: simSpeed,
+    accuracy: simAccuracy,
+    simulator: simulator.current,
+    componentsRef: simComponentsRef,
+    wiresRef,
+    setComponents,
+    onAdvance: (updated, simTimeMs) => {
+      scopeRef.current.recordSamples(simulator.current.scopeSamples, updated, simTimeMs);
+      setSimTime(simTimeMs);
+    },
+  });
+  // simClock.lagging / simClock.effectiveSpeed are for the toolbar's sim clock.
+  void simClock;
 
   const handleDropComponent = useCallback((type: string, position: Point) => {
     if (type === 'power') {
